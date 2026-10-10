@@ -407,6 +407,43 @@ async function cleanOldMouvements(){
   }catch(e){ console.error("Erreur nettoyage mouvements:", e); }
 }
 
+// Après une checklist : le comptage de l'équipage fait foi. Pour chaque produit,
+// le stock est ramené à la quantité comptée. Si on a compté moins : on retire la
+// différence en commençant par le lot qui périme le plus tôt (les pastilles sont
+// sur ces boîtes-là). Si on a compté plus : la différence est ajoutée dans un lot
+// "date à renseigner". Chaque correction est notée dans les mouvements.
+async function syncStockFromChecklist({ vehicle, counts, by }){
+  let changed=0;
+  for(const name of Object.keys(counts)){
+    const counted=counts[name];
+    const ref=doc(dbChecklists,STOCK_COL,peremptionKey(vehicle,name));
+    const snap=await getDoc(ref);
+    const cur=snap.exists()?snap.data():{ vehicle, itemName:name, lots:[] };
+    let lots=sortLots(cur.lots).map(l=>({...l}));
+    const before=lotsTotal(lots);
+    if(before===counted) continue;
+    if(counted<before){
+      let remove=before-counted;
+      lots=lots.map(l=>{
+        if(remove<=0) return l;
+        const take=Math.min(l.quantite||0,remove);
+        remove-=take;
+        return {...l, quantite:(l.quantite||0)-take};
+      }).filter(l=>(l.quantite||0)>0);
+    }else{
+      const add=counted-before;
+      const undated=lots.find(l=>!l.date);
+      if(undated) undated.quantite=(undated.quantite||0)+add;
+      else lots.push({ id:"lot"+Date.now()+Math.floor(Math.random()*1000), quantite:add, date:"" });
+    }
+    const after=lotsTotal(lots);
+    await setDoc(ref, sanitizeUndefined({ ...cur, vehicle, itemName:name, lots }));
+    await logMovement({ type:"correction", vehicle, itemName:name, qty:after-before, by:(by||"—")+" (checklist)", stockBefore:before, stockAfter:after });
+    changed++;
+  }
+  return changed;
+}
+
 // ═══ CHECKLISTS (données de départ + écrans repris de DispatchAI) ═══
 const INIT_CHECKLISTS = {
 "ALPHA 1":{edition:"12/2025",norme:"ATNUP",sections:[
@@ -801,7 +838,7 @@ function TpmrVslChecklistView({ vehicleName, template, onBack, emails, themeMode
   );
 }
 
-function ChecklistView({ vehicleName, onBack, checklists, emails, themeMode, toggleTheme }) {
+function ChecklistView({ vehicleName, onBack, checklists, emails, stockInit, themeMode, toggleTheme }) {
   const data = checklists[vehicleName];
   const weekKey = getChecklistMonthKey();
   const docId = `${vehicleName}_${weekKey}`;
@@ -815,6 +852,7 @@ function ChecklistView({ vehicleName, onBack, checklists, emails, themeMode, tog
   const [submitted, setSubmitted] = useState(false);
   const [sending, setSending] = useState(false);
   const peremptionMap = usePeremptionMap();
+  const [stockFixed, setStockFixed] = useState(null);
 
   // "YYYY-MM" <= mois actuel ? (périmé ou en cours = à considérer comme expiré)
   const isMonthExpired = (ym) => {
@@ -1021,6 +1059,11 @@ function ChecklistView({ vehicleName, onBack, checklists, emails, themeMode, tog
         <div style={{ background:CK_C.successSoft, border:`1px solid ${CK_C.success}`, borderRadius:10, padding:"14px", textAlign:"center", fontWeight:700, color:CK_C.success }}>
           {issues.length>0?(emails&&emails.length>0?`✅ Email de manquants envoyé (${emails.length} destinataire${emails.length>1?"s":""})`:"⚠️ Aucun email destinataire configuré (Paramètres)"):"✅ Checklist complète, rien à signaler"}
         </div>
+        {stockFixed!=null&&(
+          <div style={{ marginTop:12, background:CK_C.panel, border:`1px solid ${CK_C.border}`, borderRadius:10, padding:"12px", textAlign:"center", fontSize:13, color:CK_C.muted }}>
+            📦 Stock mis à jour d'après ta checklist : {stockFixed===0?"aucune différence":`${stockFixed} produit${stockFixed>1?"s":""} corrigé${stockFixed>1?"s":""}`}
+          </div>
+        )}
         <button onClick={onBack} style={{ width:"100%", marginTop:12, background:"transparent", border:`1px solid ${CK_C.border}`, borderRadius:10, color:CK_C.muted, padding:"12px", fontWeight:700, fontSize:14 }}>← Retour à la liste</button>
       </div>
     </div>
@@ -1185,6 +1228,16 @@ function ChecklistView({ vehicleName, onBack, checklists, emails, themeMode, tog
         <button disabled={sending} onClick={()=>{
           if(!canSubmit){ scrollToFirstMissing(); return; }
           sendMissingReport();
+          if(stockInit&&stockInit[vehicleName]){
+            const counts={};
+            data.sections.forEach(sec=>sec.shelves.forEach(sh=>sh.items.forEach(item=>{
+              if(item.okOnly||item.bar) return;
+              const st=checks[gk(sec.id,sh.id,item.n)];
+              if(st&&st.found!=null) counts[item.n]=(counts[item.n]||0)+st.found;
+            })));
+            syncStockFromChecklist({ vehicle:vehicleName, counts, by:[amb1,amb2].filter(Boolean).join(" / ") })
+              .then(n=>setStockFixed(n)).catch(e=>console.error("Erreur mise à jour du stock:", e));
+          }
           saveChecklistHistorique({
             id:`${vehicleName}_${weekKey}_${Date.now()}`,
             vehicle:vehicleName, date:new Date().toLocaleDateString("fr-FR"), dateISO:new Date().toISOString(),
@@ -2100,7 +2153,7 @@ function ReapproHome({ checklists, tpmrVslTemplate, stockInit, setStockInit, pct
 // ═══════════════════════════════════════════════════════════════
 // CHECKLIST (mensuelle) — liste des véhicules uniquement
 // ═══════════════════════════════════════════════════════════════
-function ChecklistHome({ onBack, onSettings, onHistory, checklists, emails, tpmrVslTemplate, themeMode, toggleTheme }) {
+function ChecklistHome({ onBack, onSettings, onHistory, checklists, emails, tpmrVslTemplate, stockInit, themeMode, toggleTheme }) {
   const [selected, setSelected] = useState(null);
   const [selectedTpmrVsl, setSelectedTpmrVsl] = useState(null);
   const [screen, setScreen] = useState("home"); // home | tpmrvsl_list
@@ -2108,7 +2161,7 @@ function ChecklistHome({ onBack, onSettings, onHistory, checklists, emails, tpmr
   const tpmrVslStatuses = useTpmrVslMonthStatus(tpmrVslTemplate);
   const monthKey = getChecklistMonthKey();
 
-  if (selected) return <ChecklistView vehicleName={selected} onBack={() => setSelected(null)} checklists={checklists} emails={emails} themeMode={themeMode} toggleTheme={toggleTheme}/>;
+  if (selected) return <ChecklistView vehicleName={selected} onBack={() => setSelected(null)} checklists={checklists} emails={emails} stockInit={stockInit} themeMode={themeMode} toggleTheme={toggleTheme}/>;
   if (selectedTpmrVsl) return <TpmrVslChecklistView vehicleName={selectedTpmrVsl} template={tpmrVslTemplate} onBack={()=>setSelectedTpmrVsl(null)} emails={emails} themeMode={themeMode} toggleTheme={toggleTheme}/>;
   if (screen==="tpmrvsl_list") return(
     <Page>
@@ -2766,7 +2819,7 @@ export default function App(){
   const openHistory=()=>setView("historique");
 
   let content;
-  if(view==="checklist") content=<ChecklistHome onBack={goHome} onSettings={openSettings} onHistory={openHistory} checklists={checklistsData} emails={checklistEmails} tpmrVslTemplate={tpmrVslTemplate} {...common}/>;
+  if(view==="checklist") content=<ChecklistHome onBack={goHome} onSettings={openSettings} onHistory={openHistory} checklists={checklistsData} emails={checklistEmails} tpmrVslTemplate={tpmrVslTemplate} stockInit={stockInit} {...common}/>;
   else if(view==="reappro") content=<ReapproHome checklists={checklistsData} tpmrVslTemplate={tpmrVslTemplate} stockInit={stockInit} setStockInit={setStockInit} pct={stockPct} stockEmails={stockEmails} remarqueEmails={checklistEmails} o2Emails={o2Emails} onBack={goHome} onSettings={openSettings} onHistory={openHistory} {...common}/>;
   else if(view==="historique") content=<HistoriqueHome onBack={goHome} checklists={checklistsData} tpmrVslTemplate={tpmrVslTemplate} peremptionEmails={peremptionEmails} {...common}/>;
   else if(view==="parametres") content=<ParametresView checklistsData={checklistsData} setChecklistsData={setChecklistsData} tpmrVslTemplate={tpmrVslTemplate} setTpmrVslTemplate={setTpmrVslTemplate} checklistEmails={checklistEmails} setChecklistEmails={setChecklistEmails} o2Emails={o2Emails} setO2Emails={setO2Emails} peremptionEmails={peremptionEmails} setPeremptionEmails={setPeremptionEmails} stockEmails={stockEmails} setStockEmails={setStockEmails} stockPct={stockPct} setStockPct={setStockPct} onBack={goHome} {...common}/>;
