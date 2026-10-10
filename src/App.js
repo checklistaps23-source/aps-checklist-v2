@@ -137,35 +137,12 @@ function useChecklistsMonthStatus(checklistsData){
   }, [monthKey, JSON.stringify(vehicleNames)]);
   return statuses;
 }
-// Statut mensuel de chaque véhicule TPMR/VSL (modèle unique partagé).
-function useTpmrVslMonthStatus(template){
-  const monthKey=getChecklistMonthKey();
-  const [statuses,setStatuses]=useState({});
-  useEffect(()=>{
-    let total=0;
-    (template.sections||[]).forEach(sec=>sec.shelves.forEach(sh=>sh.items.forEach(item=>{ if(!item.okOnly) total++; })));
-    const unsubs=TPMR_VSL_VEHICLES.map(name=>{
-      const ref=doc(dbChecklists,"stockapp_checklists",`TPMRVSL_${name}_${monthKey}`);
-      return onSnapshot(ref, snap=>{
-        const checks=snap.exists()?(snap.data().checks||{}):{};
-        const checkedCount=Object.values(checks).filter(s=>s&&s.found!=null).length;
-        const started=checkedCount>0;
-        const complete=total>0&&checkedCount>=total;
-        setStatuses(prev=>({...prev, [name]:{ started, complete, progress: total>0?Math.round((checkedCount/total)*100):0 }}));
-      }, ()=>{});
-    });
-    return ()=>unsubs.forEach(u=>u());
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [monthKey, JSON.stringify(template)]);
-  return statuses;
-}
-
 // Boutons d'en-tête communs
 function TopButton({ onClick, children, title }){
   return <button onClick={onClick} title={title} style={{background:CK_C.panel2,border:`1px solid ${CK_C.border}`,borderRadius:8,color:CK_C.muted,padding:"6px 11px",fontSize:12,fontWeight:700,cursor:"pointer"}}>{children}</button>;
 }
 // Barre du haut : retour, titre, puis clair/sombre + Paramètres + Historique
-function TopBar({ title, subtitle, onBack, themeMode, toggleTheme, onSettings, onHistory }){
+function TopBar({ title, subtitle, onBack, themeMode, toggleTheme, onBureau, onSettings, onHistory }){
   return(
     <div style={{ background:CK_C.panel, borderBottom:`1px solid ${CK_C.border}`, padding:"12px 16px", display:"flex", alignItems:"center", justifyContent:"space-between", flexWrap:"wrap", gap:10, position:"sticky", top:0, zIndex:20 }}>
       <div style={{ display:"flex", alignItems:"center", gap:10 }}>
@@ -177,6 +154,7 @@ function TopBar({ title, subtitle, onBack, themeMode, toggleTheme, onSettings, o
       </div>
       <div style={{ display:"flex", alignItems:"center", gap:6 }}>
         <TopButton onClick={toggleTheme} title="Clair / sombre">{themeMode==="light"?"🌙":"☀️"}</TopButton>
+        {onBureau&&<TopButton onClick={onBureau} title="Bureau">🏢 Bureau</TopButton>}
         {onSettings&&<TopButton onClick={onSettings} title="Paramètres">⚙️ Paramètres</TopButton>}
         {onHistory&&<TopButton onClick={onHistory} title="Historique">📅 Historique</TopButton>}
       </div>
@@ -444,6 +422,18 @@ async function syncStockFromChecklist({ vehicle, counts, by }){
   return changed;
 }
 
+// Sac / armoire scellé : on enregistre la date de péremption saisie pour chaque
+// produit daté, sous le nom du sac ("Sac pédiatrique — ALPHA 3"). Ces lots entrent
+// ainsi dans l'alerte de péremption (mail groupé) et dans l'écran Péremption.
+async function recordSealedExpiry({ label, perish, names }){
+  for(const name of names){
+    const ref=doc(dbChecklists,STOCK_COL,peremptionKey(label,name));
+    const e=perish[name];
+    if(e) await setDoc(ref, sanitizeUndefined({ vehicle:label, itemName:name, sealed:true, lots:[{ id:"sl"+Date.now()+Math.floor(Math.random()*1000), quantite:e.q, date:e.date }] }));
+    else await deleteDoc(ref);
+  }
+}
+
 // ═══ CHECKLISTS (données de départ + écrans repris de DispatchAI) ═══
 const INIT_CHECKLISTS = {
 "ALPHA 1":{edition:"12/2025",norme:"ATNUP",sections:[
@@ -684,163 +674,9 @@ function MonthYearPicker({ value, onChange, danger }){
 // ═══════════════════════════════════════
 // SAC TPMR/VSL — checklist mensuelle, modèle unique partagé par tous les véhicules TPMR/VSL
 // ═══════════════════════════════════════
-function TpmrVslChecklistView({ vehicleName, template, onBack, emails, themeMode, toggleTheme }){
-  const monthKey=getChecklistMonthKey();
-  const docId=`TPMRVSL_${vehicleName}_${monthKey}`;
-  const [doc_, updateDoc_]=useChecklistDoc(docId, { checks:{}, amb1:"", remarks:"" });
-  const checks=doc_.checks||{};
-  const amb1=doc_.amb1||"";
-  const remarks=doc_.remarks||"";
-  const [expanded,setExpanded]=useState({ [template.sections[0]?.id]:true });
-  const [submitted,setSubmitted]=useState(false);
-  const [sending,setSending]=useState(false);
-  const peremptionMap=usePeremptionMap();
-
-  const isMonthExpired=(ym)=>{ if(!ym) return false; const now=new Date(); const cur=`${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,"0")}`; return ym<=cur; };
-
-  const setField=(key,field,value)=>updateDoc_({...doc_, checks:{...checks,[key]:{...(checks[key]||{}),[field]:value}}});
-
-  let total=0, checkedCount=0, missingValidations=[], issues=[];
-  template.sections.forEach(sec=>sec.shelves.forEach(sh=>sh.items.forEach(item=>{
-    if(item.okOnly) return;
-    total++;
-    const key=`${sec.id}__${sh.id}__${item.n}`;
-    const state=checks[key]||{};
-    if(state.found!=null) checkedCount++; else missingValidations.push(item.n);
-    if(item.t && state.testOk==null) missingValidations.push(item.n+" (test)");
-    if(item.s && state.sealOk==null) missingValidations.push(item.n+" (scellé)");
-    if(state.found===0) issues.push({ name:item.n, type:"missing", missing:item.q||1 });
-    if(item.t && state.testOk===false) issues.push({ name:item.n, type:"nok_test", missing:1 });
-    if(item.s && state.sealOk===false) issues.push({ name:item.n, type:"nok_seal", missing:1 });
-  })));
-  const progress=total>0?Math.round((checkedCount/total)*100):0;
-  const hasAmbulancier=amb1.trim().length>0;
-  const canSubmit=hasAmbulancier && missingValidations.length===0 && !sending;
-
-  const sendMissingReport=async()=>{
-    if(!emails||emails.length===0||issues.length===0) return;
-    const lines=issues.map(iss=>`- ${iss.name} : ${iss.type==="missing"?`manque ${iss.missing}`:iss.type==="nok_test"?"test NOK":"scellé NOK"}`).join("\n");
-    for(const to of emails){
-      try{
-        await emailjs.send("service_mrs8v2l","template_2sxsq4j",{ to_email:to, title:`Checklist ${vehicleName} — Matériel manquant`, content:`Rempli par: ${amb1}\n\n${lines}` },"Fhdx1kTE7vFmh4z07");
-      }catch(e){ console.error("Erreur envoi email checklist:", e); }
-    }
-  };
-
-  if(submitted){
-    return(
-      <div style={{ minHeight:"100vh", background:CK_C.bg, display:"flex", alignItems:"center", justifyContent:"center", flexDirection:"column", gap:16, color:CK_C.text, fontFamily:"'DM Sans',sans-serif" }}>
-        <div style={{ fontSize:56 }}>✅</div>
-        <div style={{ fontSize:18, fontWeight:800 }}>Checklist envoyée</div>
-        <button onClick={onBack} style={{ background:CK_C.red, border:"none", borderRadius:10, color:"white", padding:"12px 24px", fontWeight:700, fontSize:14, cursor:"pointer" }}>Retour</button>
-      </div>
-    );
-  }
-
-  return(
-    <div style={{ minHeight:"100vh", background:CK_C.bg, fontFamily:"'DM Sans',sans-serif", color:CK_C.text, display:"flex", flexDirection:"column" }}>
-      <style>{CK_GS}</style>
-      <div style={{ background:CK_C.panel, borderBottom:`1px solid ${CK_C.border}`, padding:"14px 16px", display:"flex", alignItems:"center", justifyContent:"space-between", flexWrap:"wrap", gap:10, position:"sticky", top:0, zIndex:10 }}>
-        <div style={{ display:"flex", alignItems:"center", gap:10 }}>
-          <button onClick={onBack} style={{ background:"transparent", border:`1px solid ${CK_C.border}`, borderRadius:8, color:CK_C.muted, padding:"6px 12px", fontSize:14, cursor:"pointer" }}>←</button>
-          <div><div style={{ fontWeight:800, fontSize:16 }}>{vehicleName}</div><div style={{ fontSize:10, color:CK_C.muted, textTransform:"uppercase" }}>Sac TPMR/VSL — {monthYearLabel(monthKey)}</div></div>
-        </div>
-        <button onClick={toggleTheme} style={{background:CK_C.panel2,border:`1px solid ${CK_C.border}`,borderRadius:8,color:CK_C.muted,padding:"6px 12px",fontSize:11,fontWeight:600,cursor:"pointer"}}>{themeMode==="light"?"🌙":"☀️"}</button>
-      </div>
-      <div style={{ padding:"12px 18px", background:CK_C.panel2 }}>
-        <input value={amb1} onChange={e=>updateDoc_({...doc_,amb1:e.target.value})} placeholder="Nom du chauffeur" style={{ width:"100%", background:CK_C.bg, border:`1px solid ${CK_C.border}`, borderRadius:8, padding:"9px 12px", color:CK_C.text, fontSize:13, boxSizing:"border-box" }}/>
-      </div>
-      <div style={{ flex:1, padding:14, paddingBottom:100, overflowY:"auto" }}>
-        {template.sections.length===0&&<div style={{ textAlign:"center", color:CK_C.muted, padding:40 }}>Aucun modèle défini — configure-le dans Paramètres → Checklists → Sac TPMR/VSL</div>}
-        {template.sections.map(sec=>(
-          <div key={sec.id} style={{ marginBottom:10 }}>
-            <button onClick={()=>setExpanded(p=>({...p,[sec.id]:!p[sec.id]}))} style={{ width:"100%", background:sec.color||CK_C.red, border:"none", borderRadius:10, color:"white", padding:"11px 14px", fontWeight:800, fontSize:13, textAlign:"left", cursor:"pointer", display:"flex", justifyContent:"space-between" }}>
-              <span>{sec.label}</span><span>{expanded[sec.id]?"▲":"▼"}</span>
-            </button>
-            {expanded[sec.id]&&sec.shelves.map(sh=>(
-              <div key={sh.id} style={{ marginTop:8 }}>
-                {sh.label&&<div style={{ fontSize:11, fontWeight:700, color:CK_C.muted, marginBottom:6 }}>{sh.label}</div>}
-                {sh.items.map(item=>{
-                  const key=`${sec.id}__${sh.id}__${item.n}`;
-                  const state=checks[key]||{};
-                  const centralPeremptionDate=item.p?getSoonestDate(peremptionMap[peremptionKey(vehicleName,item.n)]?.lots):"";
-                  const peremptionExpired=item.p&&isMonthExpired(centralPeremptionDate);
-                  return(
-                    <div key={key} style={{ background:CK_C.panel, border:`1px solid ${CK_C.border}`, borderRadius:10, padding:12, marginBottom:8 }}>
-                      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:8 }}>
-                        <div style={{ fontSize:13, fontWeight:600 }}>{item.n}{item.container&&<span style={{ marginLeft:6, fontSize:9, fontWeight:700, color:CK_C.muted, background:CK_C.panel2, borderRadius:5, padding:"2px 6px" }}>CONTENU DÉTAILLÉ</span>}</div>
-                        <div style={{ display:"flex", gap:6 }}>
-                          <button onClick={()=>setField(key,"found",1)} style={{ background:state.found===1?CK_C.success:"transparent", border:`1px solid ${state.found===1?CK_C.success:CK_C.border}`, borderRadius:7, color:state.found===1?"white":CK_C.muted, padding:"5px 12px", fontSize:11, fontWeight:700, cursor:"pointer" }}>OK</button>
-                          <button onClick={()=>setField(key,"found",0)} style={{ background:state.found===0?CK_C.danger:"transparent", border:`1px solid ${state.found===0?CK_C.danger:CK_C.border}`, borderRadius:7, color:state.found===0?"white":CK_C.muted, padding:"5px 12px", fontSize:11, fontWeight:700, cursor:"pointer" }}>NOK</button>
-                        </div>
-                      </div>
-                      {item.t&&(
-                        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginTop:6 }}>
-                          <div style={{ fontSize:11, color:CK_C.muted }}>Test</div>
-                          <div style={{ display:"flex", gap:6 }}>
-                            <button onClick={()=>setField(key,"testOk",true)} style={{ background:state.testOk===true?CK_C.success:"transparent", border:`1px solid ${state.testOk===true?CK_C.success:CK_C.border}`, borderRadius:7, color:state.testOk===true?"white":CK_C.muted, padding:"4px 10px", fontSize:10, fontWeight:700, cursor:"pointer" }}>OK</button>
-                            <button onClick={()=>setField(key,"testOk",false)} style={{ background:state.testOk===false?CK_C.danger:"transparent", border:`1px solid ${state.testOk===false?CK_C.danger:CK_C.border}`, borderRadius:7, color:state.testOk===false?"white":CK_C.muted, padding:"4px 10px", fontSize:10, fontWeight:700, cursor:"pointer" }}>NOK</button>
-                          </div>
-                        </div>
-                      )}
-                      {item.s&&(
-                        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginTop:6 }}>
-                          <div style={{ fontSize:11, color:CK_C.muted }}>Scellé</div>
-                          <div style={{ display:"flex", gap:6 }}>
-                            <button onClick={()=>setField(key,"sealOk",true)} style={{ background:state.sealOk===true?CK_C.success:"transparent", border:`1px solid ${state.sealOk===true?CK_C.success:CK_C.border}`, borderRadius:7, color:state.sealOk===true?"white":CK_C.muted, padding:"4px 10px", fontSize:10, fontWeight:700, cursor:"pointer" }}>OK</button>
-                            <button onClick={()=>setField(key,"sealOk",false)} style={{ background:state.sealOk===false?CK_C.danger:"transparent", border:`1px solid ${state.sealOk===false?CK_C.danger:CK_C.border}`, borderRadius:7, color:state.sealOk===false?"white":CK_C.muted, padding:"4px 10px", fontSize:10, fontWeight:700, cursor:"pointer" }}>NOK</button>
-                          </div>
-                        </div>
-                      )}
-                      {item.p&&(
-                        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginTop:6 }}>
-                          <div style={{ fontSize:11, color:peremptionExpired?CK_C.danger:"#fbbf24" }}>Péremption</div>
-                          <div style={{ fontSize:11, fontWeight:700, color:peremptionExpired?CK_C.danger:CK_C.text, background:CK_C.bg, border:`1px solid ${peremptionExpired?CK_C.danger:CK_C.border}`, borderRadius:7, padding:"4px 10px" }}>
-                            {centralPeremptionDate?monthYearLabel(centralPeremptionDate):"Non renseignée (bureau)"}
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            ))}
-          </div>
-        ))}
-        <div style={{ background:CK_C.panel, border:`1px solid ${CK_C.border}`, borderRadius:12, padding:14, marginTop:6 }}>
-          <div style={{ fontSize:11, fontWeight:700, color:CK_C.muted, textTransform:"uppercase", marginBottom:8 }}>📝 Remarques</div>
-          <textarea value={remarks} onChange={e=>updateDoc_({...doc_,remarks:e.target.value})} placeholder="Matériel manquant, observations..." rows={3} style={{ width:"100%", background:CK_C.bg, border:`1px solid ${CK_C.border}`, borderRadius:8, padding:"10px 12px", color:CK_C.text, fontSize:13, resize:"none", boxSizing:"border-box" }}/>
-        </div>
-      </div>
-      <div style={{ position:"fixed", bottom:0, left:0, right:0, background:CK_C.panel, borderTop:`1px solid ${CK_C.border}`, padding:"13px 16px" }}>
-        {!canSubmit&&(
-          <div style={{ background:CK_C.dangerSoft, border:`1px solid ${CK_C.danger}`, borderRadius:8, padding:"8px 12px", marginBottom:8, fontSize:11, color:CK_C.danger, fontWeight:600 }}>
-            {!hasAmbulancier?"⚠ Indique le nom du chauffeur":`⚠ ${missingValidations.length} validation(s) manquante(s)`}
-          </div>
-        )}
-        <button disabled={!canSubmit} onClick={async()=>{
-          if(!canSubmit) return;
-          setSending(true);
-          await sendMissingReport();
-          await saveChecklistHistorique({
-            id:`${vehicleName}_${monthKey}_${Date.now()}`,
-            vehicle:vehicleName, date:new Date().toLocaleDateString("fr-FR"), dateISO:new Date().toISOString(),
-            amb1, amb2:"", remarks:remarks||"", complete:progress===100, timestamp:Date.now(),
-            issues:issues.map(iss=>({ ...iss, remaining:iss.missing, resupplied:0 })),
-          });
-          setSending(false);
-          setSubmitted(true);
-        }} style={{ width:"100%", background:!canSubmit?CK_C.border:progress===100?CK_C.success:CK_C.accent, border:"none", borderRadius:10, color:"white", padding:"14px", fontWeight:800, fontSize:15, opacity:canSubmit?1:0.85, cursor:canSubmit?"pointer":"not-allowed" }}>
-          {sending?"Envoi…":canSubmit?"✅ Envoyer au responsable":`⚠ ${!hasAmbulancier?"Chauffeur requis":missingValidations.length+" oubli(s)"}`}
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function ChecklistView({ vehicleName, onBack, checklists, emails, stockInit, themeMode, toggleTheme }) {
+function ChecklistView({ vehicleName, onBack, checklists, emails, stockInit, sealedTask, onSealedDone, themeMode, toggleTheme }) {
   const data = checklists[vehicleName];
-  const weekKey = getChecklistMonthKey();
+  const weekKey = sealedTask ? sealedTask.id : getChecklistMonthKey();
   const docId = `${vehicleName}_${weekKey}`;
   const [doc_, updateDoc_, loaded] = useChecklistDoc(docId, { checks:{}, amb1:"", amb2:"", semaine:"", remarks:"" });
   const checks = doc_.checks || {};
@@ -887,7 +723,7 @@ function ChecklistView({ vehicleName, onBack, checklists, emails, stockInit, the
   });
   const toggle = (id) => setExpanded(p => ({ ...p, [id]: !p[id] }));
 
-  const firstWeek = false; // checklist mensuelle : les péremptions viennent du stock
+  const firstWeek = !!sealedTask; // mensuelle : péremptions via le stock ; sacs scellés : date saisie
 
   // Nombre de "cases" à valider pour un article : présence (+1), test (+1 si
   // TEST), scellé (+1 si SCELLÉ), péremption (+1 si PÉREMPTION, seulement
@@ -1096,7 +932,7 @@ function ChecklistView({ vehicleName, onBack, checklists, emails, stockInit, the
 
       {firstWeek&&(()=>{ const permCount=missingValidations.filter(m=>m.includes("Date péremption")).length; return(
         <div style={{ background:"#f59e0b20", borderBottom:`1px solid #f59e0b`, padding:"9px 16px", fontSize:12, fontWeight:700, color:"#fbbf24" }}>
-          📅 1ère semaine du mois — les dates de péremption sont obligatoires ({permCount} restante{permCount!==1?"s":""})
+          📅 Sac scellé — les dates de péremption sont obligatoires ({permCount} restante{permCount!==1?"s":""})
         </div>
       );})()}
 
@@ -1201,9 +1037,11 @@ function ChecklistView({ vehicleName, onBack, checklists, emails, stockInit, the
                         {item.p&&(
                         <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:8, marginTop:6 }}>
                           <div style={{ fontSize:11, color:peremptionExpired?CK_C.danger:"#fbbf24", minWidth:80 }}>Péremption</div>
-                          <div style={{ fontSize:12, fontWeight:700, color:peremptionExpired?CK_C.danger:CK_C.text, background:CK_C.bg, border:`1px solid ${peremptionExpired?CK_C.danger:CK_C.border}`, borderRadius:8, padding:"6px 12px" }}>
+                          {sealedTask
+                            ? <MonthYearPicker value={state.date||""} onChange={v=>setDateField(key,"date",v,item)} danger={isChecked&&!isMissing&&!state.date}/>
+                            : <div style={{ fontSize:12, fontWeight:700, color:peremptionExpired?CK_C.danger:CK_C.text, background:CK_C.bg, border:`1px solid ${peremptionExpired?CK_C.danger:CK_C.border}`, borderRadius:8, padding:"6px 12px" }}>
                             {centralPeremptionDate?monthYearLabel(centralPeremptionDate):"Non renseignée (bureau)"}
-                          </div>
+                          </div>}
                         </div>
                         )}
                       </div>
@@ -1228,6 +1066,23 @@ function ChecklistView({ vehicleName, onBack, checklists, emails, stockInit, the
         <button disabled={sending} onClick={()=>{
           if(!canSubmit){ scrollToFirstMissing(); return; }
           sendMissingReport();
+          if(sealedTask){
+            const perish={}; const names=[];
+            data.sections.forEach(sec=>sec.shelves.forEach(sh=>sh.items.forEach(item=>{
+              if(!item.p) return;
+              if(!names.includes(item.n)) names.push(item.n);
+              const st=checks[gk(sec.id,sh.id,item.n)];
+              if(st&&st.found>0&&st.date){
+                const e=perish[item.n]||{ q:0, date:st.date };
+                e.q+=st.found;
+                if(st.date<e.date) e.date=st.date;
+                perish[item.n]=e;
+              }
+            })));
+            recordSealedExpiry({ label:vehicleName, perish, names })
+              .catch(e=>console.error("Erreur péremptions du sac:", e))
+              .then(()=>{ if(onSealedDone) onSealedDone(); });
+          }
           if(stockInit&&stockInit[vehicleName]){
             const counts={};
             data.sections.forEach(sec=>sec.shelves.forEach(sh=>sh.items.forEach(item=>{
@@ -1239,6 +1094,7 @@ function ChecklistView({ vehicleName, onBack, checklists, emails, stockInit, the
               .then(n=>setStockFixed(n)).catch(e=>console.error("Erreur mise à jour du stock:", e));
           }
           saveChecklistHistorique({
+
             id:`${vehicleName}_${weekKey}_${Date.now()}`,
             vehicle:vehicleName, date:new Date().toLocaleDateString("fr-FR"), dateISO:new Date().toISOString(),
             semaine:semaine||monthYearLabel(getChecklistMonthKey()),
@@ -2151,27 +2007,242 @@ function ReapproHome({ checklists, tpmrVslTemplate, stockInit, setStockInit, pct
 }
 
 // ═══════════════════════════════════════════════════════════════
-// CHECKLIST (mensuelle) — liste des véhicules uniquement
+// SCELLÉS — sacs / armoires scellés
+//  • Modèles créés dans Paramètres → Scellés (cible : Ambu ou TPMR/VSL)
+//  • Le Bureau déclenche une checklist pour un véhicule (tâche Firestore)
+//  • La tâche apparaît dans Checklist → Scellé jusqu'à ce qu'elle soit envoyée
+// Une tâche contient une copie du modèle : elle reste valable même si le
+// modèle est modifié ou supprimé ensuite.
 // ═══════════════════════════════════════════════════════════════
-function ChecklistHome({ onBack, onSettings, onHistory, checklists, emails, tpmrVslTemplate, stockInit, themeMode, toggleTheme }) {
+const SEALED_COL="stockapp_sealed_tasks";
+
+function normalizeTemplateSections(sections){
+  return (sections||[]).map(sec=>({
+    ...sec,
+    shelves:(sec.shelves||[]).map(sh=>({
+      ...sh,
+      items:(sh.items||[]).filter(it=>it.n&&it.n.trim()).map(it=>({ ...it, q:it.q||1 })),
+    })),
+  }));
+}
+// Sac TPMR/VSL : le modèle unique devient une vraie checklist avec comptage,
+// identique à celle des ambulances, pour chacun des véhicules TPMR/VSL.
+function buildTpmrChecklists(template){
+  const sections=normalizeTemplateSections(template&&template.sections);
+  const out={};
+  if(sections.length===0) return out;
+  TPMR_VSL_VEHICLES.forEach(v=>{ out[v]={ edition:"", norme:"TPMR / VSL", sections }; });
+  return out;
+}
+
+function useSealedTasks(){
+  const [tasks,setTasks]=useState([]);
+  useEffect(()=>{
+    const unsub=onSnapshot(collection(dbChecklists,SEALED_COL), snap=>{
+      const list=[];
+      snap.forEach(d=>list.push(d.data()));
+      setTasks(list.filter(t=>t.status!=="done").sort((a,b)=>(a.createdAt||0)-(b.createdAt||0)));
+    }, err=>console.error("Erreur lecture checklists scellées:", err));
+    return ()=>unsub();
+  },[]);
+  return tasks;
+}
+// Avancement de chaque tâche (non commencée / en cours / complète).
+function useSealedStatuses(tasks){
+  const [statuses,setStatuses]=useState({});
+  const sig=JSON.stringify(tasks.map(t=>t.id));
+  useEffect(()=>{
+    const unsubs=tasks.map(t=>{
+      const ref=doc(dbChecklists,"stockapp_checklists",`${t.label}_${t.id}`);
+      return onSnapshot(ref, snap=>{
+        const checks=snap.exists()?(snap.data().checks||{}):{};
+        setStatuses(prev=>({...prev, [t.id]: checklistStatus({ [t.label]:{ sections:t.sections } }, t.label, checks)}));
+      }, ()=>{});
+    });
+    return ()=>unsubs.forEach(u=>u());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  },[sig]);
+  return statuses;
+}
+
+async function createSealedTasks(template, vehicles){
+  for(const v of vehicles){
+    const id="sc"+Date.now()+Math.floor(Math.random()*1000);
+    // Pas de "await" : hors connexion l'écriture est mise en file et part toute seule au retour du réseau.
+    setDoc(doc(dbChecklists,SEALED_COL,id), sanitizeUndefined({
+      id, templateId:template.id, templateName:template.name, target:template.target, vehicle:v,
+      label:`${template.name} — ${v}`.replace(/\//g,"-"),
+      sections:normalizeTemplateSections(template.sections),
+      createdAt:Date.now(), status:"open",
+    })).catch(e=>console.error("Erreur création checklist scellée:", e));
+  }
+}
+async function finishSealedTask(task){
+  await setDoc(doc(dbChecklists,SEALED_COL,task.id), { status:"done", doneAt:Date.now() }, { merge:true });
+}
+async function cancelSealedTask(task){
+  await deleteDoc(doc(dbChecklists,SEALED_COL,task.id));
+}
+
+// ── Checklist → Scellé : les checklists à faire ──
+function SealedList({ onBack, emails, themeMode, toggleTheme }){
+  const tasks=useSealedTasks();
+  const statuses=useSealedStatuses(tasks);
+  const [open,setOpen]=useState(null);
+  if(open) return <ChecklistView vehicleName={open.label} onBack={()=>setOpen(null)} checklists={{ [open.label]:{ edition:"", norme:"scellé", sections:open.sections } }} emails={emails} sealedTask={open} onSealedDone={()=>finishSealedTask(open)} themeMode={themeMode} toggleTheme={toggleTheme}/>;
+  return(
+    <Page>
+      <TopBar title="🔒 Scellé" subtitle="Sacs et armoires scellés" onBack={onBack} themeMode={themeMode} toggleTheme={toggleTheme}/>
+      <div style={{ flex:1, padding:"20px", maxWidth:480, margin:"0 auto", width:"100%" }}>
+        {tasks.length===0&&(
+          <div style={{ textAlign:"center", color:CK_C.muted, padding:"50px 10px", fontSize:14 }}>
+            Aucune checklist scellée à faire.<br/><span style={{ fontSize:11 }}>Le bureau en déclenche une quand un sac ou une armoire a été ouvert.</span>
+          </div>
+        )}
+        <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+          {tasks.map(t=>{
+            const st=statuses[t.id];
+            const dotColor=st?.complete?CK_C.success:st?.started?"#f59e0b":CK_C.muted;
+            const dotLabel=st?.complete?"✅ Prête à envoyer":st?.started?`🟠 En cours (${st.progress}%)`:"Non commencée";
+            return(
+              <button key={t.id} onClick={()=>setOpen(t)} style={{ background:CK_C.panel, border:`1px solid ${st?.complete?CK_C.success:st?.started?"#f59e0b":CK_C.border}`, borderRadius:13, padding:"16px 20px", color:CK_C.text, textAlign:"left", display:"flex", alignItems:"center", justifyContent:"space-between", cursor:"pointer" }}>
+                <div style={{ display:"flex", alignItems:"center", gap:12 }}>
+                  <div style={{ width:42, height:42, background:CK_C.red, borderRadius:10, display:"flex", alignItems:"center", justifyContent:"center", fontSize:22 }}>🔒</div>
+                  <div>
+                    <div style={{ fontWeight:800, fontSize:15 }}>{t.label}</div>
+                    <div style={{ fontSize:11, fontWeight:700, color:dotColor, marginTop:2 }}>{dotLabel}</div>
+                  </div>
+                </div>
+                <span style={{ color:CK_C.muted, fontSize:20 }}>→</span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    </Page>
+  );
+}
+
+// ── Bureau : déclencher une checklist scellée pour un ou plusieurs véhicules ──
+function BureauView({ onBack, checklists, sealedTemplates, themeMode, toggleTheme }){
+  const tasks=useSealedTasks();
+  const [tpl,setTpl]=useState(null);
+  const [picked,setPicked]=useState([]);
+  const [busy,setBusy]=useState(false);
+  const [msg,setMsg]=useState("");
+
+  const vehiclesFor=(t)=>t.target==="TPMR"
+    ? TPMR_VSL_VEHICLES
+    : Object.keys(checklists).sort((a,b)=>a.localeCompare(b,"fr",{numeric:true}));
+  const alreadyOpen=(t,v)=>tasks.some(x=>x.templateId===t.id&&x.vehicle===v);
+  const toggle=(v)=>setPicked(p=>p.includes(v)?p.filter(x=>x!==v):[...p,v]);
+
+  const send=async()=>{
+    if(!tpl||picked.length===0||busy) return;
+    setBusy(true);
+    try{
+      await createSealedTasks(tpl, picked);
+      setMsg(`✅ ${tpl.name} envoyé pour : ${picked.join(", ")}`);
+      setTpl(null); setPicked([]);
+    }catch(e){ console.error(e); setMsg("✗ Erreur lors de l'envoi, réessaie."); }
+    setBusy(false);
+  };
+  const cancel=async(t)=>{
+    if(!window.confirm(`Annuler la checklist « ${t.label} » ?`)) return;
+    try{ await cancelSealedTask(t); }catch(e){ console.error(e); }
+  };
+
+  // Étape 2 : choix des véhicules
+  if(tpl) return(
+    <Page>
+      <TopBar title={`🏢 ${tpl.name}`} subtitle={tpl.target==="TPMR"?"Choisis les TPMR / VSL":"Choisis les ambulances"} onBack={()=>{ setTpl(null); setPicked([]); }} themeMode={themeMode} toggleTheme={toggleTheme}/>
+      <div style={{ flex:1, padding:"20px", maxWidth:480, margin:"0 auto", width:"100%" }}>
+        <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+          {vehiclesFor(tpl).map(v=>{
+            const dejaDemande=alreadyOpen(tpl,v);
+            const on=picked.includes(v);
+            return(
+              <button key={v} disabled={dejaDemande} onClick={()=>toggle(v)} style={{ background:on?CK_C.accentSoft:CK_C.panel, border:`1px solid ${on?CK_C.accent:CK_C.border}`, borderRadius:13, padding:"14px 18px", color:CK_C.text, textAlign:"left", display:"flex", alignItems:"center", justifyContent:"space-between", opacity:dejaDemande?0.5:1, cursor:dejaDemande?"not-allowed":"pointer" }}>
+                <div style={{ fontWeight:800, fontSize:15 }}>{tpl.target==="TPMR"?"♿":"🚑"} {v}</div>
+                <div style={{ fontSize:12, fontWeight:700, color:dejaDemande?"#f59e0b":on?CK_C.accent:CK_C.muted }}>{dejaDemande?"Déjà demandée":on?"✓ Choisi":""}</div>
+              </button>
+            );
+          })}
+        </div>
+        <button disabled={picked.length===0||busy} onClick={send} style={{ width:"100%", marginTop:18, background:picked.length===0?CK_C.border:CK_C.success, border:"none", borderRadius:10, color:"white", padding:"14px", fontWeight:800, fontSize:15, opacity:busy?0.6:1 }}>
+          {busy?"Envoi…":picked.length===0?"Choisis au moins un véhicule":`✅ Envoyer (${picked.length})`}
+        </button>
+      </div>
+    </Page>
+  );
+
+  // Étape 1 : choix du modèle
+  return(
+    <Page>
+      <TopBar title="🏢 Bureau" subtitle="Checklists des sacs / armoires scellés" onBack={onBack} themeMode={themeMode} toggleTheme={toggleTheme}/>
+      <div style={{ flex:1, padding:"20px", maxWidth:480, margin:"0 auto", width:"100%" }}>
+        {msg&&<div style={{ background:CK_C.successSoft, border:`1px solid ${CK_C.success}`, borderRadius:10, padding:"11px 14px", marginBottom:14, fontSize:13, fontWeight:700, color:CK_C.success }}>{msg}</div>}
+        {sealedTemplates.length===0&&(
+          <div style={{ textAlign:"center", color:CK_C.muted, padding:"40px 10px", fontSize:14 }}>
+            Aucun modèle de sac / armoire.<br/><span style={{ fontSize:11 }}>Crée-en un dans Paramètres → Scellés.</span>
+          </div>
+        )}
+        <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+          {sealedTemplates.map(t=>(
+            <button key={t.id} onClick={()=>{ setMsg(""); setTpl(t); setPicked([]); }} style={{ background:CK_C.panel, border:`1px solid ${CK_C.border}`, borderRadius:13, padding:"16px 20px", color:CK_C.text, textAlign:"left", display:"flex", alignItems:"center", justifyContent:"space-between", cursor:"pointer" }}>
+              <div>
+                <div style={{ fontWeight:800, fontSize:16 }}>{t.name}</div>
+                <div style={{ fontSize:11, color:CK_C.muted }}>{t.target==="TPMR"?"TPMR / VSL":"Ambulances"}</div>
+              </div>
+              <span style={{ color:CK_C.muted, fontSize:20 }}>→</span>
+            </button>
+          ))}
+        </div>
+        {tasks.length>0&&(
+          <div style={{ marginTop:26 }}>
+            <div style={{ fontSize:11, fontWeight:700, color:CK_C.muted, textTransform:"uppercase", letterSpacing:"1px", marginBottom:8 }}>Déjà envoyées, pas encore terminées ({tasks.length})</div>
+            {tasks.map(t=>(
+              <div key={t.id} style={{ display:"flex", alignItems:"center", justifyContent:"space-between", background:CK_C.panel, border:`1px solid ${CK_C.border}`, borderRadius:10, padding:"10px 14px", marginBottom:6 }}>
+                <span style={{ fontSize:13, fontWeight:600 }}>🔒 {t.label}</span>
+                <button onClick={()=>cancel(t)} title="Annuler cette checklist" style={{ background:CK_C.dangerSoft, border:`1px solid ${CK_C.danger}`, borderRadius:6, color:CK_C.danger, padding:"5px 9px", fontSize:11, fontWeight:700 }}>Annuler</button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </Page>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════
+// CHECKLIST (mensuelle) — Scellé, puis la liste des véhicules
+// ═══════════════════════════════════════════════════════════════
+function ChecklistHome({ onBack, onSettings, onHistory, checklists, emails, tpmrVslTemplate, sealedTemplates, stockInit, themeMode, toggleTheme }) {
   const [selected, setSelected] = useState(null);
   const [selectedTpmrVsl, setSelectedTpmrVsl] = useState(null);
-  const [screen, setScreen] = useState("home"); // home | tpmrvsl_list
+  const [screen, setScreen] = useState("home"); // home | tpmrvsl_list | scelle | bureau
+  const tpmrChecklists = buildTpmrChecklists(tpmrVslTemplate);
+  const hasTpmr = Object.keys(tpmrChecklists).length > 0;
   const statuses = useChecklistsMonthStatus(checklists);
-  const tpmrVslStatuses = useTpmrVslMonthStatus(tpmrVslTemplate);
+  const tpmrVslStatuses = useChecklistsMonthStatus(tpmrChecklists);
+  const sealedTasks = useSealedTasks();
+  const sealedStatuses = useSealedStatuses(sealedTasks);
   const monthKey = getChecklistMonthKey();
 
   if (selected) return <ChecklistView vehicleName={selected} onBack={() => setSelected(null)} checklists={checklists} emails={emails} stockInit={stockInit} themeMode={themeMode} toggleTheme={toggleTheme}/>;
-  if (selectedTpmrVsl) return <TpmrVslChecklistView vehicleName={selectedTpmrVsl} template={tpmrVslTemplate} onBack={()=>setSelectedTpmrVsl(null)} emails={emails} themeMode={themeMode} toggleTheme={toggleTheme}/>;
+  if (selectedTpmrVsl && tpmrChecklists[selectedTpmrVsl]) return <ChecklistView vehicleName={selectedTpmrVsl} onBack={()=>setSelectedTpmrVsl(null)} checklists={tpmrChecklists} emails={emails} stockInit={stockInit} themeMode={themeMode} toggleTheme={toggleTheme}/>;
+  if (screen==="scelle") return <SealedList onBack={()=>setScreen("home")} emails={emails} themeMode={themeMode} toggleTheme={toggleTheme}/>;
+  if (screen==="bureau") return <BureauView onBack={()=>setScreen("home")} checklists={checklists} sealedTemplates={sealedTemplates} themeMode={themeMode} toggleTheme={toggleTheme}/>;
   if (screen==="tpmrvsl_list") return(
     <Page>
       <TopBar title="♿ Sac TPMR/VSL" subtitle={`${monthYearLabel(monthKey)} — modèle unique partagé`} onBack={()=>setScreen("home")} themeMode={themeMode} toggleTheme={toggleTheme}/>
       <div style={{ flex:1, padding:"20px", maxWidth:480, margin:"0 auto", width:"100%" }}>
+        {!hasTpmr&&<div style={{ textAlign:"center", color:CK_C.muted, padding:40 }}>Aucun modèle défini — configure-le dans Paramètres → Checklists → Sac TPMR/VSL</div>}
         <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
-          {TPMR_VSL_VEHICLES.map(v=>{
+          {hasTpmr&&TPMR_VSL_VEHICLES.map(v=>{
             const st=tpmrVslStatuses[v];
             const dotColor=st?.complete?CK_C.success:st?.started?"#f59e0b":CK_C.muted;
-            const dotLabel=st?.complete?"✅ Complète":st?.started?"🟠 En cours":"Non commencée";
+            const dotLabel=st?.complete?"✅ Complète":st?.started?`🟠 En cours (${st.progress}%)`:"Non commencée";
             return(
               <button key={v} onClick={()=>setSelectedTpmrVsl(v)} style={{ background:CK_C.panel, border:`1px solid ${st?.complete?CK_C.success:st?.started?"#f59e0b":CK_C.border}`, borderRadius:13, padding:"14px 18px", color:CK_C.text, textAlign:"left", display:"flex", alignItems:"center", justifyContent:"space-between", cursor:"pointer" }}>
                 <div style={{ display:"flex", alignItems:"center", gap:10 }}>
@@ -2187,12 +2258,28 @@ function ChecklistHome({ onBack, onSettings, onHistory, checklists, emails, tpmr
     </Page>
   );
 
+  const sealedStarted = sealedTasks.some(t=>sealedStatuses[t.id]?.started);
   return (
     <Page>
-      <TopBar title="📋 Checklist" subtitle="Sélectionnez votre véhicule" onBack={onBack} themeMode={themeMode} toggleTheme={toggleTheme} onSettings={onSettings} onHistory={onHistory}/>
+      <TopBar title="📋 Checklist" subtitle="Sélectionnez votre véhicule" onBack={onBack} themeMode={themeMode} toggleTheme={toggleTheme} onBureau={()=>setScreen("bureau")} onSettings={onSettings} onHistory={onHistory}/>
       <div style={{ textAlign:"center", padding:"10px 20px 0", fontSize:12, color:CK_C.muted, fontWeight:600, textTransform:"capitalize" }}>Checklist mensuelle — {monthYearLabel(monthKey)}</div>
       <div style={{ flex:1, padding:"20px", maxWidth:480, margin:"0 auto", width:"100%" }}>
         <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+          <button onClick={()=>setScreen("scelle")} style={{ background:CK_C.panel, border:`1px solid ${sealedTasks.length>0?"#f59e0b":CK_C.border}`, borderRadius:13, padding:"16px 20px", color:CK_C.text, textAlign:"left", display:"flex", alignItems:"center", justifyContent:"space-between", cursor:"pointer" }}>
+            <div style={{ display:"flex", alignItems:"center", gap:12 }}>
+              <div style={{ width:42, height:42, background:CK_C.panel2, border:`1px solid ${CK_C.border}`, borderRadius:10, display:"flex", alignItems:"center", justifyContent:"center", fontSize:22 }}>🔒</div>
+              <div>
+                <div style={{ fontWeight:800, fontSize:16 }}>Scellé</div>
+                <div style={{ fontSize:11, fontWeight:700, color:sealedTasks.length>0?"#f59e0b":CK_C.muted }}>
+                  {sealedTasks.length===0?"Rien à faire":sealedStarted?`🟠 ${sealedTasks.length} checklist${sealedTasks.length>1?"s":""} à faire (en cours)`:`${sealedTasks.length} checklist${sealedTasks.length>1?"s":""} à faire`}
+                </div>
+              </div>
+            </div>
+            <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+              <Badge n={sealedTasks.length} color="#f59e0b"/>
+              <span style={{ color:CK_C.muted, fontSize:20 }}>→</span>
+            </div>
+          </button>
           {Object.keys(checklists).sort((a,b)=>{
             const aDone=statuses[a]?.complete?1:0;
             const bDone=statuses[b]?.complete?1:0;
@@ -2257,6 +2344,7 @@ function PeremptionView({ onBack, checklists, tpmrVslTemplate, peremptionEmails,
       rows.push({ vehicleName:v, itemName:e.name, key:e.key, lots:sortLots(d&&d.lots) });
     });
   });
+  Object.keys(stockMap).forEach(k=>{ const d=stockMap[k]; if(d&&d.sealed&&(d.lots||[]).length>0) rows.push({ vehicleName:d.vehicle, itemName:d.itemName, key:k, lots:sortLots(d.lots) }); });
   const vehicleNames=[...new Set(rows.map(r=>r.vehicleName))];
   const cur=getChecklistMonthKey();
   const isExpired=(ym)=>!!ym && ym<=cur;
@@ -2458,6 +2546,103 @@ function HistoriqueHome({ onBack, checklists, tpmrVslTemplate, peremptionEmails,
 }
 
 // ═══════════════════════════════════════════════════════════════
+// PARAMÈTRES → SCELLÉS : créer / modifier les modèles de sacs et armoires
+// ═══════════════════════════════════════════════════════════════
+function SealedTemplatesEditor({ templates, setTemplates }){
+  const C=CK_C;
+  const [editId,setEditId]=useState(null);
+  const [newName,setNewName]=useState("");
+  const [newTarget,setNewTarget]=useState("AMB");
+  const tpl=templates.find(t=>t.id===editId);
+  const inp={ background:C.bg, color:C.text, fontSize:13, border:`1px solid ${C.border}`, borderRadius:8, padding:"8px 10px" };
+  const noSlash=(s)=>s.replace(/\//g,"-");
+
+  const upd=(fn)=>setTemplates(p=>p.map(t=>t.id===editId?fn(t):t));
+  const updSection=(sid,fn)=>upd(t=>({ ...t, sections:t.sections.map(s=>s.id===sid?fn(s):s) }));
+  const updItems=(sid,fn)=>updSection(sid,s=>({ ...s, shelves:[{ ...s.shelves[0], items:fn(s.shelves[0].items) }] }));
+
+  const addTemplate=()=>{
+    const name=noSlash(newName.trim());
+    if(!name) return;
+    const id="t"+Date.now();
+    setTemplates(p=>[...p,{ id, name, target:newTarget, sections:[] }]);
+    setNewName("");
+    setEditId(id);
+  };
+  const deleteTemplate=(t)=>{
+    if(!window.confirm(`Supprimer le modèle « ${t.name} » ? Les checklists déjà envoyées ne sont pas touchées.`)) return;
+    setTemplates(p=>p.filter(x=>x.id!==t.id));
+  };
+
+  if(!tpl) return(
+    <div>
+      <SectionTitle icon="🔒" title="Sacs et armoires scellés"/>
+      <div style={{ fontSize:12, color:C.muted, marginBottom:14 }}>Crée ici la checklist de chaque sac ou armoire scellé. Quand l'un d'eux est ouvert, le bureau déclenche sa checklist pour le véhicule concerné (bouton Bureau dans Checklist).</div>
+      <div style={{ background:C.panel, border:`1px solid ${C.border}`, borderRadius:12, padding:14, marginBottom:18 }}>
+        <div style={{ fontSize:11, fontWeight:700, color:C.muted, textTransform:"uppercase", marginBottom:8 }}>Nouveau modèle</div>
+        <input value={newName} onChange={e=>setNewName(e.target.value)} placeholder="Ex : Sac pédiatrique, Sac Kata…" style={{ ...inp, width:"100%", marginBottom:10, boxSizing:"border-box" }}/>
+        <div style={{ display:"flex", gap:8, marginBottom:12 }}>
+          {[["AMB","🚑 Ambulances"],["TPMR","♿ TPMR / VSL"]].map(([v,lbl])=>(
+            <button key={v} onClick={()=>setNewTarget(v)} style={{ flex:1, padding:"10px", borderRadius:9, border:`1px solid ${newTarget===v?C.accent:C.border}`, background:newTarget===v?C.accentSoft:"transparent", color:newTarget===v?C.accent:C.muted, fontWeight:700, fontSize:13 }}>{lbl}</button>
+          ))}
+        </div>
+        <button onClick={addTemplate} disabled={!newName.trim()} style={{ width:"100%", background:newName.trim()?C.accent:C.border, border:"none", borderRadius:9, color:"white", padding:"11px", fontWeight:800, fontSize:14 }}>+ Créer le modèle</button>
+      </div>
+      {templates.length===0&&<div style={{ textAlign:"center", color:C.muted, fontSize:13, padding:"10px 0" }}>Aucun modèle pour l'instant.</div>}
+      {templates.map(t=>{
+        const nbItems=(t.sections||[]).reduce((s,sec)=>s+sec.shelves.reduce((a,sh)=>a+sh.items.length,0),0);
+        return(
+          <div key={t.id} style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:8, background:C.panel, border:`1px solid ${C.border}`, borderRadius:10, padding:"12px 14px", marginBottom:8 }}>
+            <div>
+              <div style={{ fontWeight:800, fontSize:14 }}>{t.name}</div>
+              <div style={{ fontSize:11, color:C.muted }}>{t.target==="TPMR"?"TPMR / VSL":"Ambulances"} · {nbItems} produit{nbItems>1?"s":""}</div>
+            </div>
+            <div style={{ display:"flex", gap:6 }}>
+              <button onClick={()=>setEditId(t.id)} style={{ background:C.accentSoft, border:`1px solid ${C.accent}`, borderRadius:7, color:C.accent, padding:"7px 12px", fontSize:12, fontWeight:700 }}>Modifier</button>
+              <button onClick={()=>deleteTemplate(t)} style={{ background:C.dangerSoft, border:`1px solid ${C.danger}`, borderRadius:7, color:C.danger, padding:"7px 10px", fontSize:12 }}>🗑</button>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+
+  return(
+    <div>
+      <button onClick={()=>setEditId(null)} style={{ background:"transparent", border:`1px solid ${C.border}`, borderRadius:8, color:C.muted, padding:"6px 12px", fontSize:13, marginBottom:14 }}>← Tous les modèles</button>
+      <div style={{ display:"flex", gap:8, marginBottom:10 }}>
+        <input value={tpl.name} onChange={e=>upd(t=>({ ...t, name:noSlash(e.target.value) }))} style={{ ...inp, flex:1, fontWeight:800, fontSize:15 }}/>
+      </div>
+      <div style={{ display:"flex", gap:8, marginBottom:16 }}>
+        {[["AMB","🚑 Ambulances"],["TPMR","♿ TPMR / VSL"]].map(([v,lbl])=>(
+          <button key={v} onClick={()=>upd(t=>({ ...t, target:v }))} style={{ flex:1, padding:"9px", borderRadius:9, border:`1px solid ${tpl.target===v?C.accent:C.border}`, background:tpl.target===v?C.accentSoft:"transparent", color:tpl.target===v?C.accent:C.muted, fontWeight:700, fontSize:12 }}>{lbl}</button>
+        ))}
+      </div>
+      <div style={{ fontSize:11, color:C.muted, marginBottom:14 }}>🗓 = produit à date de péremption (la date est demandée à chaque checklist) · 🔧 = produit à tester (fonctionnel OK / NOK)</div>
+      {tpl.sections.map(sec=>(
+        <div key={sec.id} style={{ background:C.panel, border:`1px solid ${C.border}`, borderRadius:12, padding:12, marginBottom:12 }}>
+          <div style={{ display:"flex", gap:6, marginBottom:10 }}>
+            <input value={sec.label} onChange={e=>updSection(sec.id,s=>({ ...s, label:e.target.value }))} placeholder="Nom de la section" style={{ ...inp, flex:1, fontWeight:700 }}/>
+            <button onClick={()=>{ if(window.confirm(`Supprimer la section « ${sec.label} » ?`)) upd(t=>({ ...t, sections:t.sections.filter(s=>s.id!==sec.id) })); }} style={{ background:C.dangerSoft, border:`1px solid ${C.danger}`, borderRadius:7, color:C.danger, padding:"7px 10px", fontSize:12 }}>🗑</button>
+          </div>
+          {sec.shelves[0].items.map((it,i)=>(
+            <div key={i} style={{ display:"flex", gap:5, alignItems:"center", marginBottom:6 }}>
+              <input value={it.n} onChange={e=>updItems(sec.id,items=>items.map((x,j)=>j===i?{ ...x, n:e.target.value }:x))} placeholder="Nom du produit" style={{ ...inp, flex:1, minWidth:0 }}/>
+              <input type="number" min="1" value={it.q||1} onChange={e=>updItems(sec.id,items=>items.map((x,j)=>j===i?{ ...x, q:Math.max(1,parseInt(e.target.value)||1) }:x))} title="Quantité" style={{ ...inp, width:54, textAlign:"center" }}/>
+              <button onClick={()=>updItems(sec.id,items=>items.map((x,j)=>j===i?{ ...x, p:!x.p }:x))} title="Date de péremption" style={{ padding:"7px 8px", borderRadius:7, border:`1px solid ${it.p?"#f59e0b":C.border}`, background:it.p?"#f59e0b20":"transparent", opacity:it.p?1:0.5, fontSize:13 }}>🗓</button>
+              <button onClick={()=>updItems(sec.id,items=>items.map((x,j)=>j===i?{ ...x, t:!x.t }:x))} title="À tester" style={{ padding:"7px 8px", borderRadius:7, border:`1px solid ${it.t?"#60a5fa":C.border}`, background:it.t?"#1d4ed820":"transparent", opacity:it.t?1:0.5, fontSize:13 }}>🔧</button>
+              <button onClick={()=>updItems(sec.id,items=>items.filter((_,j)=>j!==i))} style={{ background:C.dangerSoft, border:`1px solid ${C.danger}`, borderRadius:7, color:C.danger, padding:"7px 8px", fontSize:11 }}>🗑</button>
+            </div>
+          ))}
+          <button onClick={()=>updItems(sec.id,items=>[...items,{ n:"", q:1 }])} style={{ background:"transparent", border:`1px dashed ${C.border}`, borderRadius:8, color:C.muted, padding:"7px 12px", fontSize:12, width:"100%" }}>+ Produit</button>
+        </div>
+      ))}
+      <button onClick={()=>upd(t=>({ ...t, sections:[...t.sections,{ id:Math.max(0,...t.sections.map(x=>Number(x.id)||0))+1, label:"Nouvelle section", color:"#dc2626", shelves:[{ id:"A", label:"", items:[] }] }] }))} style={{ width:"100%", background:C.accentSoft, border:`1px solid ${C.accent}`, borderRadius:10, color:C.accent, padding:"11px", fontWeight:800, fontSize:13 }}>+ Section</button>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════
 // IMPORT depuis DispatchAI (one shot, au lancement officiel de DispatchAI :
 // on récupère l'historique ici puis on supprime cette app)
 // ═══════════════════════════════════════════════════════════════
@@ -2518,7 +2703,7 @@ function EmailList({ icon, title, hint, list, setList }){
   );
 }
 
-function ParametresView({ checklistsData, setChecklistsData, tpmrVslTemplate, setTpmrVslTemplate, checklistEmails, setChecklistEmails, o2Emails, setO2Emails, peremptionEmails, setPeremptionEmails, stockEmails, setStockEmails, stockPct, setStockPct, onBack, themeMode, toggleTheme }){
+function ParametresView({ checklistsData, setChecklistsData, tpmrVslTemplate, setTpmrVslTemplate, checklistEmails, setChecklistEmails, o2Emails, setO2Emails, peremptionEmails, setPeremptionEmails, stockEmails, setStockEmails, stockPct, setStockPct, sealedTemplates, setSealedTemplates, onBack, themeMode, toggleTheme }){
   const [tab,setTab]=useState("emails");
   const [editingChecklist,setEditingChecklist]=useState(null); // {key, origKey, isNew, norme, edition, sections}
   const [confirmDeleteChecklist,setConfirmDeleteChecklist]=useState(null);
@@ -2555,7 +2740,7 @@ function ParametresView({ checklistsData, setChecklistsData, tpmrVslTemplate, se
   const removeItem=(sIdx,shIdx,itIdx)=>setEditingChecklist(p=>({...p,sections:p.sections.map((s,i)=>i===sIdx?{...s,shelves:s.shelves.map((sh,j)=>j===shIdx?{...sh,items:sh.items.filter((_,k)=>k!==itIdx)}:sh)}:s)}));
   const updateItem=(sIdx,shIdx,itIdx,field,val)=>setEditingChecklist(p=>({...p,sections:p.sections.map((s,i)=>i===sIdx?{...s,shelves:s.shelves.map((sh,j)=>j===shIdx?{...sh,items:sh.items.map((it,k)=>k===itIdx?{...it,[field]:val}:it)}:sh)}:s)}));
 
-  const TABS=[{id:"emails",icon:"✉️",label:"Emails"},{id:"checklists",icon:"📋",label:"Checklists"},{id:"seuils",icon:"📉",label:"Seuils"},{id:"import",icon:"⬇️",label:"Importer"}];
+  const TABS=[{id:"emails",icon:"✉️",label:"Emails"},{id:"checklists",icon:"📋",label:"Checklists"},{id:"scelles",icon:"🔒",label:"Scellés"},{id:"seuils",icon:"📉",label:"Seuils"},{id:"import",icon:"⬇️",label:"Importer"}];
   const runImport=async()=>{
     setConfirmImport(false);
     setImportBusy(true);
@@ -2709,6 +2894,7 @@ function ParametresView({ checklistsData, setChecklistsData, tpmrVslTemplate, se
               )}
             </div>
           )}
+        {tab==="scelles"&&<SealedTemplatesEditor templates={sealedTemplates} setTemplates={setSealedTemplates}/>}
         {tab==="seuils"&&(
           <div>
             <SectionTitle icon="📉" title="Seuil minimum par défaut"/>
@@ -2756,9 +2942,12 @@ function ParametresView({ checklistsData, setChecklistsData, tpmrVslTemplate, se
 function HomeView({ onGo, onSettings, onHistory, checklistsData, tpmrVslTemplate, stockInit, stockPct, themeMode, toggleTheme }){
   const stockMap=useStockMap();
   const ambStatuses=useChecklistsMonthStatus(checklistsData);
-  const tpmrStatuses=useTpmrVslMonthStatus(tpmrVslTemplate);
+  const tpmrChecklists=buildTpmrChecklists(tpmrVslTemplate);
+  const tpmrStatuses=useChecklistsMonthStatus(tpmrChecklists);
+  const sealedTasks=useSealedTasks();
   const pending=Object.keys(checklistsData).filter(n=>!ambStatuses[n]?.complete).length
-    +(tpmrVslTemplate.sections&&tpmrVslTemplate.sections.length>0?TPMR_VSL_VEHICLES.filter(n=>!tpmrStatuses[n]?.complete).length:0);
+    +Object.keys(tpmrChecklists).filter(n=>!tpmrStatuses[n]?.complete).length
+    +sealedTasks.length;
   const lowTotal=allVehicleNames(checklistsData).reduce((s,v)=>{
     if(!(stockInit&&stockInit[v])) return s;
     return s+buildCatalogue(v,checklistsData,tpmrVslTemplate).filter(e=>isLow(stockMap,e,stockPct)).length;
@@ -2800,6 +2989,7 @@ export default function App(){
   const [stockEmails,setStockEmails]=useSettings("stockEmails",[]);
   const [stockInit,setStockInit]=useSettings("stockInit",{});
   const [stockPct,setStockPct]=useSettings("stockPct",30);
+  const [sealedTemplates,setSealedTemplates]=useSettings("sealedTemplates",[]);
 
   // Alertes de péremption : vérifiées une fois au démarrage (dès que les
   // destinataires sont chargés), pas seulement à l'ouverture de l'écran Péremption.
@@ -2819,10 +3009,10 @@ export default function App(){
   const openHistory=()=>setView("historique");
 
   let content;
-  if(view==="checklist") content=<ChecklistHome onBack={goHome} onSettings={openSettings} onHistory={openHistory} checklists={checklistsData} emails={checklistEmails} tpmrVslTemplate={tpmrVslTemplate} stockInit={stockInit} {...common}/>;
+  if(view==="checklist") content=<ChecklistHome onBack={goHome} onSettings={openSettings} onHistory={openHistory} checklists={checklistsData} emails={checklistEmails} tpmrVslTemplate={tpmrVslTemplate} sealedTemplates={sealedTemplates} stockInit={stockInit} {...common}/>;
   else if(view==="reappro") content=<ReapproHome checklists={checklistsData} tpmrVslTemplate={tpmrVslTemplate} stockInit={stockInit} setStockInit={setStockInit} pct={stockPct} stockEmails={stockEmails} remarqueEmails={checklistEmails} o2Emails={o2Emails} onBack={goHome} onSettings={openSettings} onHistory={openHistory} {...common}/>;
   else if(view==="historique") content=<HistoriqueHome onBack={goHome} checklists={checklistsData} tpmrVslTemplate={tpmrVslTemplate} peremptionEmails={peremptionEmails} {...common}/>;
-  else if(view==="parametres") content=<ParametresView checklistsData={checklistsData} setChecklistsData={setChecklistsData} tpmrVslTemplate={tpmrVslTemplate} setTpmrVslTemplate={setTpmrVslTemplate} checklistEmails={checklistEmails} setChecklistEmails={setChecklistEmails} o2Emails={o2Emails} setO2Emails={setO2Emails} peremptionEmails={peremptionEmails} setPeremptionEmails={setPeremptionEmails} stockEmails={stockEmails} setStockEmails={setStockEmails} stockPct={stockPct} setStockPct={setStockPct} onBack={goHome} {...common}/>;
+  else if(view==="parametres") content=<ParametresView checklistsData={checklistsData} setChecklistsData={setChecklistsData} tpmrVslTemplate={tpmrVslTemplate} setTpmrVslTemplate={setTpmrVslTemplate} checklistEmails={checklistEmails} setChecklistEmails={setChecklistEmails} o2Emails={o2Emails} setO2Emails={setO2Emails} peremptionEmails={peremptionEmails} setPeremptionEmails={setPeremptionEmails} stockEmails={stockEmails} setStockEmails={setStockEmails} stockPct={stockPct} setStockPct={setStockPct} sealedTemplates={sealedTemplates} setSealedTemplates={setSealedTemplates} onBack={goHome} {...common}/>;
   else content=<HomeView onGo={setView} onSettings={openSettings} onHistory={openHistory} checklistsData={checklistsData} tpmrVslTemplate={tpmrVslTemplate} stockInit={stockInit} stockPct={stockPct} {...common}/>;
 
   return <StockProvider>{content}</StockProvider>;
