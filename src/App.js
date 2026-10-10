@@ -1676,29 +1676,47 @@ function O2ReserveView({ onBack, themeMode, toggleTheme, emails }){
   );
 }
 
+// ═══════════════════════════════════════════════════════════════
+// ALERTE PÉREMPTION — 1 seul mail regroupant tous les produits périmés,
+// classés par véhicule. Un lot est considéré périmé dès le 1er jour du mois
+// indiqué sur sa date. Chaque lot n'est signalé qu'une seule fois.
+// ═══════════════════════════════════════════════════════════════
 async function checkAndSendPeremptionAlerts(checklistsData, peremptionEmails){
   if(!peremptionEmails||peremptionEmails.length===0) return;
   try{
+    const cur=getChecklistMonthKey(); // "YYYY-MM" du mois en cours
     const snap=await getDocs(collection(dbChecklists,"stockapp_stock"));
-    const now=new Date();
-    const oneMonthOut=new Date(now.getFullYear(),now.getMonth()+1,now.getDate());
+    const found=[]; // { vehicle, itemName, quantite, date }
+    const toMark=[]; // docs à marquer comme signalés
     for(const d of snap.docs){
       const data=d.data();
-      const soonest=getSoonestDate(data.lots);
-      if(!soonest) continue;
-      if(data.alertSentForDate===soonest) continue; // déjà alerté pour cette date précise
-      const expDate=new Date(soonest+"-01T00:00:00");
-      if(expDate<=oneMonthOut){
-        for(const to of peremptionEmails){
-          try{
-            await emailjs.send("service_mrs8v2l","template_2sxsq4j",{
-              to_email:to, title:"Alerte Péremption — "+data.vehicle,
-              content:`L'article "${data.itemName}" du véhicule ${data.vehicle} arrive à échéance : ${monthYearLabel(soonest)}.`,
-            },"Fhdx1kTE7vFmh4z07");
-          }catch(e){ console.error("Erreur envoi email péremption:", e); }
-        }
-        await setDoc(doc(dbChecklists,"stockapp_stock",d.id), {...data, alertSentForDate:soonest});
-      }
+      const already=new Set(data.expiredNotified||[]);
+      const fresh=(data.lots||[]).filter(l=>l.date&&l.date<=cur&&(l.quantite||0)>0&&!already.has(l.id));
+      if(fresh.length===0) continue;
+      fresh.forEach(l=>found.push({ vehicle:data.vehicle, itemName:data.itemName, quantite:l.quantite, date:l.date }));
+      toMark.push({ id:d.id, data, ids:fresh.map(l=>l.id) });
+    }
+    if(found.length===0) return;
+
+    // On marque d'abord (pour éviter un doublon si l'app est ouverte sur 2 appareils)
+    for(const m of toMark){
+      const prev=m.data.expiredNotified||[];
+      await setDoc(doc(dbChecklists,"stockapp_stock",m.id), {...m.data, expiredNotified:[...prev,...m.ids]});
+    }
+
+    const byVehicle={};
+    found.forEach(f=>{ (byVehicle[f.vehicle]=byVehicle[f.vehicle]||[]).push(f); });
+    const lines=Object.keys(byVehicle).sort((a,b)=>a.localeCompare(b,"fr",{numeric:true})).map(v=>{
+      const items=byVehicle[v].sort((a,b)=>a.date.localeCompare(b.date)||a.itemName.localeCompare(b.itemName,"fr"))
+        .map(f=>`   • ${f.itemName} — ${f.quantite}× (péremption ${monthYearLabel(f.date)})`).join("\n");
+      return `🚑 ${v}\n${items}`;
+    }).join("\n\n");
+    const content=`Produits périmés à remplacer (${found.length} lot${found.length>1?"s":""}) :\n\n${lines}`;
+
+    for(const to of peremptionEmails){
+      try{
+        await emailjs.send("service_mrs8v2l","template_2sxsq4j",{ to_email:to, title:"Alerte Péremption — produits périmés à remplacer", content },"Fhdx1kTE7vFmh4z07");
+      }catch(e){ console.error("Erreur envoi email péremption:", e); }
     }
   }catch(e){ console.error("Erreur vérification alertes péremption:", e); }
 }
@@ -2506,7 +2524,7 @@ function ParametresView({ checklistsData, setChecklistsData, tpmrVslTemplate, se
           <div>
             <EmailList icon="📋" title="Emails — Checklists et remarques" hint="Reçoivent les checklists envoyées (matériel manquant) et les remarques." list={checklistEmails} setList={setChecklistEmails}/>
             <EmailList icon="🅾️" title="Emails — Alerte stock oxygène" hint="Reçoivent un email dès qu'une taille de bouteille (B2/B5/B10) tombe à 2, 1 ou 0 pleines en réserve." list={o2Emails} setList={setO2Emails}/>
-            <EmailList icon="🗓️" title="Emails — Alerte Péremption" hint="Reçoivent un email quand un lot expire dans moins d'un mois (ou est déjà périmé)." list={peremptionEmails} setList={setPeremptionEmails}/>
+            <EmailList icon="🗓️" title="Emails — Alerte Péremption" hint="Reçoivent 1 seul email, le 1er du mois de péremption, qui liste les produits périmés à remplacer, classés par véhicule." list={peremptionEmails} setList={setPeremptionEmails}/>
             <EmailList icon="📉" title="Emails — Alerte stock bas" hint="Reçoivent un email quand un produit passe sous son seuil minimum dans un véhicule (une seule fois au franchissement du seuil)." list={stockEmails} setList={setStockEmails}/>
           </div>
         )}
@@ -2732,11 +2750,12 @@ export default function App(){
 
   // Alertes de péremption : vérifiées une fois au démarrage (dès que les
   // destinataires sont chargés), pas seulement à l'ouverture de l'écran Péremption.
-  const alertsChecked=useRef(false);
   useEffect(()=>{
-    if(alertsChecked.current||!peremptionEmails||peremptionEmails.length===0) return;
-    alertsChecked.current=true;
+    if(!peremptionEmails||peremptionEmails.length===0) return;
     checkAndSendPeremptionAlerts(checklistsData, peremptionEmails);
+    // La tablette murale reste ouverte : on revérifie toutes les 6 h
+    const t=setInterval(()=>checkAndSendPeremptionAlerts(checklistsData, peremptionEmails), 6*60*60*1000);
+    return ()=>clearInterval(t);
   },[peremptionEmails]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(()=>{ cleanOldHistorique(); },[]);
