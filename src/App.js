@@ -1292,6 +1292,7 @@ function O2HistoriqueSubView({ onBack, themeMode, toggleTheme }){
         {!loaded&&<div style={{ textAlign:"center", color:CK_C.muted, padding:"40px" }}>Chargement…</div>}
         {loaded&&entries.length===0&&<div style={{ textAlign:"center", color:CK_C.muted, padding:"40px" }}>Aucun mouvement pour l'instant</div>}
         {entries.map(entry=>{
+          if(entry.type==="correction") return <O2CorrectionCard key={entry.id} entry={entry} onDelete={()=>setConfirmDelete(entry)}/>;
           const isFournisseur=entry.type==="fournisseur";
           const sortieLines=O2_SIZES.filter(s=>(entry.sortie?.[s]||0)>0);
           const entreeLines=O2_SIZES.filter(s=>(entry.entree?.[s]||0)>0);
@@ -1336,58 +1337,6 @@ function O2HistoriqueSubView({ onBack, themeMode, toggleTheme }){
   );
 }
 
-// Applique un mouvement de bouteilles à la réserve et journalise l'action.
-// type "vehicule" : sortie (bouteille retirée du véhicule) → +1 vide ; entrée (bouteille installée) → -1 pleine.
-// type "fournisseur" : sortie (vide reprise par le fournisseur) → -1 vide ; entrée (pleine livrée) → +1 pleine.
-async function applyO2Movement(type, sortie, entree, extra){
-  try{
-    const ref=doc(dbChecklists,"stockapp_o2","reserve");
-    const snap=await getDoc(ref);
-    const current=snap.exists()?snap.data():O2_EMPTY_RESERVE;
-    const currentPleines={...O2_EMPTY_RESERVE.pleines,...current.pleines};
-    const next={ pleines:{...currentPleines}, vides:{...O2_EMPTY_RESERVE.vides,...current.vides} };
-    O2_SIZES.forEach(s=>{
-      if(type==="vehicule"){
-        next.vides[s]=(next.vides[s]||0)+(sortie[s]||0);
-        next.pleines[s]=Math.max(0,(next.pleines[s]||0)-(entree[s]||0));
-      }else{
-        next.vides[s]=Math.max(0,(next.vides[s]||0)-(sortie[s]||0));
-        next.pleines[s]=(next.pleines[s]||0)+(entree[s]||0);
-      }
-    });
-    await setDoc(ref,next);
-    const logId=`${type}_${Date.now()}`;
-    await setDoc(doc(dbChecklists,"stockapp_o2_historique",logId),{
-      id:logId, type, sortie, entree,
-      date:new Date().toLocaleDateString("fr-FR"), dateISO:new Date().toISOString(), timestamp:Date.now(),
-      ...extra,
-    });
-    return { current:currentPleines, next:next.pleines };
-  }catch(e){ console.error("Erreur mouvement O2:", e); return { current:{}, next:{} }; }
-}
-// Supprime une entrée de l'historique O2 et annule son effet sur les
-// compteurs de réserve (pour pouvoir nettoyer des tests sans fausser le stock).
-async function deleteO2HistoriqueEntry(entry){
-  try{
-    const ref=doc(dbChecklists,"stockapp_o2","reserve");
-    const snap=await getDoc(ref);
-    const current=snap.exists()?snap.data():O2_EMPTY_RESERVE;
-    const next={ pleines:{...O2_EMPTY_RESERVE.pleines,...current.pleines}, vides:{...O2_EMPTY_RESERVE.vides,...current.vides} };
-    const sortie=entry.sortie||{}, entree=entry.entree||{};
-    O2_SIZES.forEach(s=>{
-      if(entry.type==="vehicule"){
-        next.vides[s]=Math.max(0,(next.vides[s]||0)-(sortie[s]||0));
-        next.pleines[s]=(next.pleines[s]||0)+(entree[s]||0);
-      }else{
-        next.vides[s]=(next.vides[s]||0)+(sortie[s]||0);
-        next.pleines[s]=Math.max(0,(next.pleines[s]||0)-(entree[s]||0));
-      }
-    });
-    await setDoc(ref,next);
-    await deleteDoc(doc(dbChecklists,"stockapp_o2_historique",entry.id));
-  }catch(e){ console.error("Erreur suppression historique O2:", e); }
-}
-
 async function checkAndSendO2LowStock(currentPleines, nextPleines, emails){
   const justDropped = O2_SIZES.some(s => (nextPleines[s]||0) < (currentPleines[s]||0) && (nextPleines[s]||0)<=2);
   if(!justDropped) return;
@@ -1421,6 +1370,120 @@ async function cleanOldO2Historique(){
   }catch(e){ console.error("Erreur nettoyage historique O2:", e); }
 }
 
+// ═══════════════════════════════════════════════════════════════
+// O₂ — logique : réserve (pleines/vides) + contenu de chaque ambulance.
+// Doc `stockapp_o2/reserve` = { pleines:{B2,B5,B10}, vides:{...}, vehicules:{ "ALPHA 1":{B2,B5,B10}, ... } }
+// ═══════════════════════════════════════════════════════════════
+const O2_ZERO=()=>({B2:0,B5:0,B10:0});
+function normO2Reserve(d){
+  const base=d||{};
+  const vehicules={};
+  O2_VEHICLES.forEach(v=>{ vehicules[v]={ ...O2_ZERO(), ...((base.vehicules||{})[v]||{}) }; });
+  return { pleines:{ ...O2_EMPTY_RESERVE.pleines, ...base.pleines }, vides:{ ...O2_EMPTY_RESERVE.vides, ...base.vides }, vehicules };
+}
+function o2ContentText(c){
+  const parts=O2_SIZES.filter(s=>(c?.[s]||0)>0).map(s=>`${s} ×${c[s]}`);
+  return parts.length?parts.join(", "):"aucune bouteille";
+}
+
+// type "vehicule" : sortie (retirée du véhicule) → -contenu véhicule, +vides ; entrée (installée) → +contenu véhicule, -pleines.
+// type "fournisseur" : sortie (vides reprises) → -vides ; entrée (pleines livrées) → +pleines.
+async function applyO2Movement(type, sortie, entree, extra){
+  try{
+    const ref=doc(dbChecklists,"stockapp_o2","reserve");
+    const snap=await getDoc(ref);
+    const next=normO2Reserve(snap.exists()?snap.data():null);
+    const currentPleines={ ...next.pleines };
+    O2_SIZES.forEach(s=>{
+      if(type==="vehicule"){
+        const v=extra&&extra.vehicle;
+        next.vides[s]=(next.vides[s]||0)+(sortie[s]||0);
+        next.pleines[s]=Math.max(0,(next.pleines[s]||0)-(entree[s]||0));
+        if(v&&next.vehicules[v]) next.vehicules[v][s]=Math.max(0,(next.vehicules[v][s]||0)-(sortie[s]||0)+(entree[s]||0));
+      }else{
+        next.vides[s]=Math.max(0,(next.vides[s]||0)-(sortie[s]||0));
+        next.pleines[s]=(next.pleines[s]||0)+(entree[s]||0);
+      }
+    });
+    await setDoc(ref,next);
+    const logId=`${type}_${Date.now()}`;
+    await setDoc(doc(dbChecklists,"stockapp_o2_historique",logId),{
+      id:logId, type, sortie, entree,
+      date:new Date().toLocaleDateString("fr-FR"), dateISO:new Date().toISOString(), timestamp:Date.now(),
+      ...extra,
+    });
+    return { current:currentPleines, next:next.pleines };
+  }catch(e){ console.error("Erreur mouvement O2:", e); return { current:{}, next:{} }; }
+}
+
+// Correction manuelle : on encode ce qui est réellement là (stock + ambulances).
+async function applyO2Correction(values, by){
+  try{
+    const ref=doc(dbChecklists,"stockapp_o2","reserve");
+    const snap=await getDoc(ref);
+    const before=normO2Reserve(snap.exists()?snap.data():null);
+    const after=normO2Reserve(values);
+    await setDoc(ref,after);
+    const logId=`correction_${Date.now()}`;
+    await setDoc(doc(dbChecklists,"stockapp_o2_historique",logId),{
+      id:logId, type:"correction", name:by, before, after,
+      date:new Date().toLocaleDateString("fr-FR"), dateISO:new Date().toISOString(), timestamp:Date.now(),
+    });
+  }catch(e){ console.error("Erreur correction O2:", e); }
+}
+
+// Supprime une entrée de l'historique O2 et annule son effet (une correction est seulement retirée du journal).
+async function deleteO2HistoriqueEntry(entry){
+  try{
+    if(entry.type!=="correction"){
+      const ref=doc(dbChecklists,"stockapp_o2","reserve");
+      const snap=await getDoc(ref);
+      const next=normO2Reserve(snap.exists()?snap.data():null);
+      const sortie=entry.sortie||{}, entree=entry.entree||{};
+      O2_SIZES.forEach(s=>{
+        if(entry.type==="vehicule"){
+          next.vides[s]=Math.max(0,(next.vides[s]||0)-(sortie[s]||0));
+          next.pleines[s]=(next.pleines[s]||0)+(entree[s]||0);
+          if(entry.vehicle&&next.vehicules[entry.vehicle]) next.vehicules[entry.vehicle][s]=Math.max(0,(next.vehicules[entry.vehicle][s]||0)+(sortie[s]||0)-(entree[s]||0));
+        }else{
+          next.vides[s]=(next.vides[s]||0)+(sortie[s]||0);
+          next.pleines[s]=Math.max(0,(next.pleines[s]||0)-(entree[s]||0));
+        }
+      });
+      await setDoc(ref,next);
+    }
+    await deleteDoc(doc(dbChecklists,"stockapp_o2_historique",entry.id));
+  }catch(e){ console.error("Erreur suppression historique O2:", e); }
+}
+
+// Carte d'une correction dans l'historique O₂
+function O2CorrectionCard({ entry, onDelete }){
+  const b=entry.before||normO2Reserve(null), a=entry.after||normO2Reserve(null);
+  const lines=[];
+  O2_SIZES.forEach(s=>{
+    if((b.pleines?.[s]||0)!==(a.pleines?.[s]||0)) lines.push(`Pleines ${s} : ${b.pleines?.[s]||0} → ${a.pleines?.[s]||0}`);
+    if((b.vides?.[s]||0)!==(a.vides?.[s]||0)) lines.push(`Vides ${s} : ${b.vides?.[s]||0} → ${a.vides?.[s]||0}`);
+  });
+  O2_VEHICLES.forEach(v=>{
+    const x=(b.vehicules||{})[v]||{}, y=(a.vehicules||{})[v]||{};
+    if(O2_SIZES.some(s=>(x[s]||0)!==(y[s]||0))) lines.push(`${v} : ${o2ContentText(x)} → ${o2ContentText(y)}`);
+  });
+  return(
+    <div style={{ background:CK_C.panel, border:`1px solid #f59e0b`, borderLeft:`4px solid #f59e0b`, borderRadius:12, padding:"14px", marginBottom:10 }}>
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start" }}>
+        <div style={{ fontWeight:800, fontSize:14, color:"#f59e0b" }}>✏️ Correction manuelle</div>
+        <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+          <div style={{ fontSize:11, color:CK_C.muted }}>{entry.date}</div>
+          <button onClick={onDelete} style={{ background:CK_C.dangerSoft, border:`1px solid ${CK_C.danger}`, borderRadius:6, color:CK_C.danger, padding:"4px 8px", fontSize:11, cursor:"pointer" }}>🗑</button>
+        </div>
+      </div>
+      <div style={{ marginTop:8, fontSize:12 }}>
+        {lines.length===0?<div style={{ color:CK_C.muted }}>Aucun changement</div>:lines.map((l,i)=>(<div key={i} style={{ marginBottom:2 }}>{l}</div>))}
+      </div>
+      {entry.name&&<div style={{ marginTop:8, paddingTop:8, borderTop:`1px solid ${CK_C.border}`, fontSize:11, color:CK_C.muted }}>Par : <strong style={{color:CK_C.text}}>{entry.name}</strong></div>}
+    </div>
+  );
+}
 const O2_VEHICLES=["ALPHA 1","ALPHA 2","ALPHA 3","ALPHA 4","ALPHA 5","ALPHA 6","ALPHA 7","Préventif"];
 
 function BottleStepper({label,value,onChange,max=2}){
@@ -1440,8 +1503,8 @@ function BottleStepper({label,value,onChange,max=2}){
 // RÉSERVE OXYGÈNE — compteurs, échanges véhicules, livraison fournisseur
 // ═══════════════════════════════════════
 function O2ReserveView({ onBack, themeMode, toggleTheme, emails }){
-  const [reserve,setReserve]=useState(O2_EMPTY_RESERVE);
-  const [screen,setScreen]=useState("home"); // home | vehicle | fournisseur | historique
+  const [reserve,setReserve]=useState(normO2Reserve(null));
+  const [screen,setScreen]=useState("home"); // home | vehicle | fournisseur | historique | corriger
   const [selectedVehicle,setSelectedVehicle]=useState(null);
   const [sortie,setSortie]=useState({B2:0,B5:0,B10:0});
   const [entree,setEntree]=useState({B2:0,B5:0,B10:0});
@@ -1452,10 +1515,13 @@ function O2ReserveView({ onBack, themeMode, toggleTheme, emails }){
   const [fEntree,setFEntree]=useState({B2:0,B5:0,B10:0});
   const [fSaving,setFSaving]=useState(false);
 
+  const [cDraft,setCDraft]=useState(null);
+  const [cName,setCName]=useState("");
+
   useEffect(()=>{
     const unsub=onSnapshot(doc(dbChecklists,"stockapp_o2","reserve"), snap=>{
       const d=snap.exists()?snap.data():O2_EMPTY_RESERVE;
-      setReserve({ pleines:{...O2_EMPTY_RESERVE.pleines,...d.pleines}, vides:{...O2_EMPTY_RESERVE.vides,...d.vides} });
+      setReserve(normO2Reserve(d));
     });
     return ()=>unsub();
   },[]);
@@ -1493,12 +1559,51 @@ function O2ReserveView({ onBack, themeMode, toggleTheme, emails }){
         <div style={{ fontWeight:800, fontSize:16 }}>{title}</div>
       </div>
       <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+        {screen==="home"&&<button onClick={()=>{ setCDraft(JSON.parse(JSON.stringify(reserve))); setCName(""); setScreen("corriger"); }} style={{background:CK_C.panel2,border:`1px solid ${CK_C.border}`,borderRadius:8,color:CK_C.muted,padding:"6px 12px",fontSize:11,fontWeight:600,cursor:"pointer"}}>✏️ Corriger</button>}
         {screen==="home"&&<button onClick={()=>setScreen("historique")} style={{background:CK_C.panel2,border:`1px solid ${CK_C.border}`,borderRadius:8,color:CK_C.muted,padding:"6px 12px",fontSize:11,fontWeight:600,cursor:"pointer"}}>📅 Historique</button>}
         {screen==="home"&&<button onClick={()=>setScreen("fournisseur")} style={{background:CK_C.panel2,border:`1px solid ${CK_C.border}`,borderRadius:8,color:CK_C.muted,padding:"6px 12px",fontSize:11,fontWeight:600,cursor:"pointer"}}>🚚 Livraison fournisseur</button>}
         <button onClick={toggleTheme} style={{background:CK_C.panel2,border:`1px solid ${CK_C.border}`,borderRadius:8,color:CK_C.muted,padding:"6px 12px",fontSize:11,fontWeight:600,cursor:"pointer"}}>{themeMode==="light"?"🌙":"☀️"}</button>
       </div>
     </div>
   );
+
+  if(screen==="corriger"&&cDraft){
+    const setP=(k,s,v)=>setCDraft(p=>({ ...p, [k]:{ ...p[k], [s]:v } }));
+    const setV=(veh,s,v)=>setCDraft(p=>({ ...p, vehicules:{ ...p.vehicules, [veh]:{ ...p.vehicules[veh], [s]:v } } }));
+    const canSave=cName.trim().length>0;
+    const save=()=>{
+      if(!canSave) return;
+      applyO2Correction(cDraft,cName.trim()).catch(e=>console.error(e));
+      rememberName(cName);
+      setCDraft(null); setScreen("home");
+    };
+    const box={ background:CK_C.panel, border:`1px solid ${CK_C.border}`, borderRadius:12, padding:"16px", marginBottom:14 };
+    return(
+      <div style={{ minHeight:"100vh", background:CK_C.bg, fontFamily:"'DM Sans',sans-serif", color:CK_C.text, display:"flex", flexDirection:"column" }}>
+        <style>{CK_GS}</style>
+        {headerBar("✏️ Corriger l'O₂")}
+        <div style={{ flex:1, padding:"18px", maxWidth:420, margin:"0 auto", width:"100%" }}>
+          <div style={{ fontSize:12, color:CK_C.muted, marginBottom:14 }}>Encode ce qui est réellement là. Les chiffres remplacent les anciens.</div>
+          <div style={box}>
+            <div style={{ fontSize:11, fontWeight:700, color:"#3b82f6", textTransform:"uppercase", marginBottom:4 }}>Stock — bouteilles pleines</div>
+            {O2_SIZES.map(s=>(<BottleStepper key={s} label={s} value={cDraft.pleines[s]||0} onChange={v=>setP("pleines",s,v)} max={99}/>))}
+          </div>
+          <div style={box}>
+            <div style={{ fontSize:11, fontWeight:700, color:CK_C.muted, textTransform:"uppercase", marginBottom:4 }}>Stock — bouteilles vides</div>
+            {O2_SIZES.map(s=>(<BottleStepper key={s} label={s} value={cDraft.vides[s]||0} onChange={v=>setP("vides",s,v)} max={99}/>))}
+          </div>
+          {O2_VEHICLES.map(veh=>(
+            <div key={veh} style={box}>
+              <div style={{ fontSize:11, fontWeight:700, color:CK_C.success, textTransform:"uppercase", marginBottom:4 }}>{veh==="Préventif"?"🧰 Préventif":`🚑 ${veh}`} — bouteilles dedans</div>
+              {O2_SIZES.map(s=>(<BottleStepper key={s} label={s} value={cDraft.vehicules[veh][s]||0} onChange={v=>setV(veh,s,v)} max={9}/>))}
+            </div>
+          ))}
+          <input value={cName} onChange={e=>setCName(e.target.value)} placeholder="Ton nom (obligatoire)*" style={{ width:"100%", background:CK_C.bg, border:`1px solid ${cName.trim()?CK_C.border:CK_C.danger}`, borderRadius:8, padding:"10px 12px", color:CK_C.text, fontSize:13, marginBottom:14, boxSizing:"border-box" }}/>
+          <button disabled={!canSave} onClick={save} style={{ width:"100%", background:canSave?CK_C.success:CK_C.border, border:"none", borderRadius:10, color:"white", padding:"14px", fontWeight:800, fontSize:15, marginBottom:30 }}>✅ Enregistrer la correction</button>
+        </div>
+      </div>
+    );
+  }
 
   if(screen==="historique"){
     return <O2HistoriqueSubView onBack={()=>setScreen("home")} themeMode={themeMode} toggleTheme={toggleTheme}/>;
@@ -1538,6 +1643,9 @@ function O2ReserveView({ onBack, themeMode, toggleTheme, emails }){
             <div style={{ background:CK_C.successSoft, border:`1px solid ${CK_C.success}`, borderRadius:10, padding:"16px", textAlign:"center", fontWeight:700, color:CK_C.success }}>{savedMsg}</div>
           ):(
             <>
+              <div style={{ background:CK_C.panel2, border:`1px solid ${CK_C.border}`, borderRadius:12, padding:"12px 16px", marginBottom:14, fontSize:13, fontWeight:700 }}>
+                Dans {selectedVehicle} : <span style={{ color:"#3b82f6" }}>{o2ContentText(reserve.vehicules[selectedVehicle])}</span>
+              </div>
               <div style={{ background:CK_C.panel, border:`1px solid ${CK_C.border}`, borderRadius:12, padding:"16px", marginBottom:14 }}>
                 <div style={{ fontSize:11, fontWeight:700, color:CK_C.danger, textTransform:"uppercase", marginBottom:4 }}>Sortie</div>
                 <div style={{ fontSize:10, color:CK_C.muted, marginBottom:6 }}>Bouteille(s) retirée(s) du véhicule</div>
@@ -1579,6 +1687,7 @@ function O2ReserveView({ onBack, themeMode, toggleTheme, emails }){
           {O2_VEHICLES.map(v=>(
             <button key={v} onClick={()=>{setSelectedVehicle(v);setScreen("vehicle");}} style={{ background:CK_C.panel, border:`1px solid ${CK_C.border}`, borderRadius:12, padding:"18px 10px", color:CK_C.text, fontWeight:700, fontSize:14, cursor:"pointer" }}>
               {v==="Préventif"?"🧰 Préventif":`🚑 ${v}`}
+              <div style={{ fontSize:10, fontWeight:600, color:CK_C.muted, marginTop:4 }}>{o2ContentText(reserve.vehicules[v])}</div>
             </button>
           ))}
         </div>
@@ -2001,7 +2110,7 @@ function ReapproHome({ checklists, tpmrVslTemplate, stockInit, setStockInit, pct
       <div style={{ padding:20, maxWidth:560, margin:"0 auto", width:"100%", display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(150px,1fr))", gap:14 }}>
         {tile(<span style={{ color:"#3b82f6", fontWeight:900 }}>O₂</span>,"O₂","Réserve de bouteilles",()=>setScreen("o2"),0)}
         {tile("🚑","Réappro véhicules","Entrées et sorties de produits",()=>setScreen("veh"),lowTotal)}
-        {tile("📝","Remarque","Message à l'équipe",()=>setShowRemarque(true),0)}
+        {tile("📝","Remarque","Message au responsable",()=>setShowRemarque(true),0)}
       </div>
       <ManquementsList checklists={checklists} tpmrVslTemplate={tpmrVslTemplate} stockInit={stockInit}/>
       {showRemarque&&<RemarqueModal emails={remarqueEmails} onClose={()=>setShowRemarque(false)}/>}
