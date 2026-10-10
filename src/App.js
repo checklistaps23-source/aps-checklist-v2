@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useContext, createContext } from "react";
 import { dbChecklists } from "./firebase";
 import { dbDispatch } from "./firebaseDispatch";
-import { doc, onSnapshot, setDoc, getDoc, getDocs, deleteDoc, collection, writeBatch } from "firebase/firestore";
+import { doc, onSnapshot, setDoc, getDoc, getDocs, deleteDoc, collection, writeBatch, query, where } from "firebase/firestore";
 import emailjs from "@emailjs/browser";
 
 // ═══════════════════════════════════════════════════════════════
@@ -119,7 +119,7 @@ function getChecklistMonthKey(){
   const d=new Date();
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}`;
 }
-// Statut mensuel (fait / en cours / pas commencé) des checklists Alpha.
+// Statut mensuel (envoyée / complète / en cours / pas commencée) d'un groupe de checklists.
 function useChecklistsMonthStatus(checklistsData){
   const monthKey=getChecklistMonthKey();
   const vehicleNames=Object.keys(checklistsData);
@@ -129,7 +129,8 @@ function useChecklistsMonthStatus(checklistsData){
       const ref=doc(dbChecklists,"stockapp_checklists",`${name}_${monthKey}`);
       return onSnapshot(ref, snap=>{
         const checks=snap.exists()?(snap.data().checks||{}):{};
-        setStatuses(prev=>({...prev, [name]: checklistStatus(checklistsData, name, checks)}));
+        const sent=snap.exists()&&!!snap.data().submittedAt; // envoyée au responsable
+        setStatuses(prev=>({...prev, [name]: { ...checklistStatus(checklistsData, name, checks), sent }}));
       }, ()=>{});
     });
     return ()=>unsubs.forEach(u=>u());
@@ -857,7 +858,7 @@ function ChecklistView({ vehicleName, onBack, checklists, emails, stockInit, sea
   if (submitted) return (
     <div style={{ minHeight:"100vh", background:CK_C.bg, fontFamily:"'DM Sans',sans-serif", color:CK_C.text }}>
       <div style={{ background:CK_C.panel, borderBottom:`1px solid ${CK_C.border}`, padding:"14px 18px", display:"flex", alignItems:"center", gap:12 }}>
-        <button onClick={() => setSubmitted(false)} style={{ background:"transparent", border:`1px solid ${CK_C.border}`, borderRadius:8, color:CK_C.muted, padding:"6px 12px", fontSize:14 }}>←</button>
+        <button onClick={onBack} style={{ background:"transparent", border:`1px solid ${CK_C.border}`, borderRadius:8, color:CK_C.muted, padding:"6px 12px", fontSize:14 }}>←</button>
         <div style={{ fontWeight:800, fontSize:16 }}>📋 Rapport {vehicleName}</div>
       </div>
       <div style={{ padding:"20px", maxWidth:560, margin:"0 auto" }}>
@@ -1066,6 +1067,7 @@ function ChecklistView({ vehicleName, onBack, checklists, emails, stockInit, sea
         <button disabled={sending} onClick={()=>{
           if(!canSubmit){ scrollToFirstMissing(); return; }
           sendMissingReport();
+          updateDoc_({ submittedAt:Date.now() });
           if(sealedTask){
             const perish={}; const names=[];
             data.sections.forEach(sec=>sec.shelves.forEach(sh=>sh.items.forEach(item=>{
@@ -1095,7 +1097,7 @@ function ChecklistView({ vehicleName, onBack, checklists, emails, stockInit, sea
           }
           saveChecklistHistorique({
 
-            id:`${vehicleName}_${weekKey}_${Date.now()}`,
+            id:`${vehicleName}_${weekKey}_${Date.now()}`, v2:true, sealed:!!sealedTask,
             vehicle:vehicleName, date:new Date().toLocaleDateString("fr-FR"), dateISO:new Date().toISOString(),
             semaine:semaine||monthYearLabel(getChecklistMonthKey()),
             amb1, amb2, remarks:remarks||"", complete:progress===100, timestamp:Date.now(),
@@ -1116,7 +1118,7 @@ function ChecklistView({ vehicleName, onBack, checklists, emails, stockInit, sea
 
 async function saveChecklistHistorique(entry){
   try{
-    await setDoc(doc(dbChecklists,"stockapp_historique",entry.id), entry);
+    await setDoc(doc(dbChecklists,"stockapp_historique",entry.id), sanitizeUndefined(entry));
   }catch(e){ console.error("Erreur sauvegarde historique:", e); }
 }
 // Purge les entrées de plus de 24 mois (écart de mois calendaires, pas de
@@ -2001,6 +2003,7 @@ function ReapproHome({ checklists, tpmrVslTemplate, stockInit, setStockInit, pct
         {tile("🚑","Réappro véhicules","Entrées et sorties de produits",()=>setScreen("veh"),lowTotal)}
         {tile("📝","Remarque","Message à l'équipe",()=>setShowRemarque(true),0)}
       </div>
+      <ManquementsList checklists={checklists} tpmrVslTemplate={tpmrVslTemplate} stockInit={stockInit}/>
       {showRemarque&&<RemarqueModal emails={remarqueEmails} onClose={()=>setShowRemarque(false)}/>}
     </Page>
   );
@@ -2215,12 +2218,145 @@ function BureauView({ onBack, checklists, sealedTemplates, themeMode, toggleThem
 }
 
 // ═══════════════════════════════════════════════════════════════
-// CHECKLIST (mensuelle) — Scellé, puis la liste des véhicules
+// MANQUEMENTS — tout ce que les checklists ont signalé et qui n'est pas encore
+// réglé. Affiché dans Réappro, avec un bouton "Résolu" (nom obligatoire).
+// Pour un produit manquant : la quantité remise est ajoutée au stock du véhicule.
+// ═══════════════════════════════════════════════════════════════
+function useOpenIssues(){
+  const [issues,setIssues]=useState([]);
+  useEffect(()=>{
+    const q=query(collection(dbChecklists,"stockapp_historique"), where("v2","==",true));
+    const unsub=onSnapshot(q, snap=>{
+      const list=[];
+      snap.forEach(d=>{
+        const e=d.data();
+        (e.issues||[]).forEach((it,idx)=>{
+          if(!(it.remaining>0)) return;
+          list.push({ entryId:e.id||d.id, idx, vehicle:e.vehicle, sealed:!!e.sealed, date:e.date, timestamp:e.timestamp||0, name:it.name, type:it.type, remaining:it.remaining, required:it.required, bar:it.bar });
+        });
+      });
+      list.sort((a,b)=>a.vehicle.localeCompare(b.vehicle,"fr",{numeric:true})||a.name.localeCompare(b.name,"fr"));
+      setIssues(list);
+    }, err=>console.error("Erreur lecture manquements:", err));
+    return ()=>unsub();
+  },[]);
+  return issues;
+}
+
+function issueText(i){
+  if(i.type==="missing") return `manque ${i.remaining}${i.required?` / ${i.required}`:""}`;
+  if(i.type==="nok_test") return "test NOK (non fonctionnel)";
+  if(i.type==="nok_seal") return "scellé NOK (rompu)";
+  if(i.type==="low_bar") return `niveau bas (${i.bar} bar)`;
+  return "à traiter";
+}
+
+// Marque le manquement comme résolu (+ entrée en stock si demandé).
+async function resolveIssue({ issue, by, qty, date, addToStock }){
+  const ref=doc(dbChecklists,"stockapp_historique",issue.entryId);
+  const snap=await getDoc(ref);
+  if(!snap.exists()) return;
+  const entry=snap.data();
+  const issues=(entry.issues||[]).map((it,i)=>{
+    if(i!==issue.idx) return it;
+    if(it.type==="missing"){
+      return { ...it, remaining:Math.max(0,(it.remaining||0)-qty), resupplied:(it.resupplied||0)+qty, resolvedBy:by, resolvedAt:Date.now() };
+    }
+    return { ...it, remaining:0, resolvedBy:by, resolvedAt:Date.now() };
+  });
+  const writes=[ setDoc(ref, sanitizeUndefined({ ...entry, issues })) ];
+  if(addToStock&&issue.type==="missing"&&qty>0){
+    writes.push(applyStockMovement({ vehicle:issue.vehicle, itemName:issue.name, type:"entree", qty, date:date||"", by:`${by} (manquement résolu)`, minValue:0, emails:[] }));
+  }
+  await Promise.all(writes);
+}
+
+function ResolveSheet({ issue, checklists, tpmrVslTemplate, stockInit, onClose }){
+  const isMissing=issue.type==="missing";
+  const canAddStock=isMissing&&!issue.sealed&&!!(stockInit&&stockInit[issue.vehicle]);
+  const entry=canAddStock?buildCatalogue(issue.vehicle,checklists,tpmrVslTemplate).find(e=>e.name===issue.name):null;
+  const perishable=!!(entry&&entry.p);
+  const [name,setName]=useState("");
+  const [qty,setQty]=useState(Math.max(1,issue.remaining||1));
+  const [date,setDate]=useState("");
+  const ok=name.trim().length>0&&(!perishable||qty<=0||!!date);
+
+  const confirm=()=>{
+    if(!ok) return;
+    // Fermeture immédiate : l'écriture part toute seule, même sans réseau.
+    resolveIssue({ issue, by:name.trim(), qty:isMissing?qty:0, date, addToStock:canAddStock })
+      .catch(e=>console.error("Erreur résolution manquement:", e));
+    rememberName(name);
+    onClose();
+  };
+
+  return(
+    <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,0.85)", display:"flex", alignItems:"center", justifyContent:"center", zIndex:700, padding:16 }}>
+      <div style={{ background:CK_C.panel, border:`1px solid ${CK_C.border}`, borderRadius:16, padding:22, width:400, maxWidth:"100%", maxHeight:"92vh", overflowY:"auto" }}>
+        <div style={{ fontWeight:800, fontSize:16, marginBottom:2 }}>✅ Résolu</div>
+        <div style={{ fontSize:13, fontWeight:700 }}>{issue.name}</div>
+        <div style={{ fontSize:11, color:CK_C.muted, marginBottom:14 }}>{issue.vehicle} · {issueText(issue)}</div>
+        <NameField value={name} onChange={setName} label="Ton nom"/>
+        {isMissing&&(
+          <div style={{ marginBottom:12 }}>
+            <div style={{ fontSize:10, color:CK_C.muted, marginBottom:5, textTransform:"uppercase", fontWeight:700 }}>Quantité remise</div>
+            <Stepper value={qty} onChange={setQty}/>
+          </div>
+        )}
+        {perishable&&(
+          <div style={{ marginBottom:12 }}>
+            <div style={{ fontSize:10, color:CK_C.muted, marginBottom:5, textTransform:"uppercase", fontWeight:700 }}>Date de péremption*</div>
+            <MonthYearPicker value={date} onChange={setDate} danger={!date}/>
+          </div>
+        )}
+        <div style={{ fontSize:11, color:CK_C.muted, marginBottom:16 }}>
+          {canAddStock?`Cette quantité sera ajoutée au stock de ${issue.vehicle}.`:isMissing?"Le stock de ce véhicule n'est pas suivi : le manquement sera seulement clôturé.":"Le problème sera clôturé."}
+        </div>
+        <div style={{ display:"flex", gap:8 }}>
+          <button onClick={onClose} style={{ flex:1, background:CK_C.panel2, border:`1px solid ${CK_C.border}`, borderRadius:9, color:CK_C.muted, padding:"12px", fontWeight:700, fontSize:13 }}>Annuler</button>
+          <button onClick={confirm} disabled={!ok} style={{ flex:1, background:ok?CK_C.success:CK_C.border, border:"none", borderRadius:9, color:"white", padding:"12px", fontWeight:800, fontSize:13 }}>Résolu</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ManquementsList({ checklists, tpmrVslTemplate, stockInit }){
+  const issues=useOpenIssues();
+  const [resolving,setResolving]=useState(null);
+  const vehicles=[...new Set(issues.map(i=>i.vehicle))];
+  return(
+    <div style={{ padding:"4px 20px 40px", maxWidth:560, margin:"0 auto", width:"100%" }}>
+      <div style={{ fontSize:11, fontWeight:700, color:CK_C.muted, textTransform:"uppercase", letterSpacing:"1px", margin:"10px 0 10px" }}>⚠ Manquements des checklists ({issues.length})</div>
+      {issues.length===0&&<div style={{ background:CK_C.successSoft, border:`1px solid ${CK_C.success}`, borderRadius:12, padding:"14px", textAlign:"center", fontWeight:700, fontSize:13, color:CK_C.success }}>Aucun manquement à traiter ✅</div>}
+      {vehicles.map(v=>(
+        <div key={v} style={{ background:CK_C.panel, border:`1px solid ${CK_C.border}`, borderRadius:12, padding:"12px 14px", marginBottom:10 }}>
+          <div style={{ fontWeight:800, fontSize:14, marginBottom:8 }}>{v}</div>
+          {issues.filter(i=>i.vehicle===v).map(i=>(
+            <div key={i.entryId+"_"+i.idx} style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:8, padding:"7px 0", borderTop:`1px solid ${CK_C.border}` }}>
+              <div style={{ minWidth:0 }}>
+                <div style={{ fontSize:13, fontWeight:600 }}>{i.name}</div>
+                <div style={{ fontSize:11, color:CK_C.danger, fontWeight:700 }}>{issueText(i)} <span style={{ color:CK_C.muted, fontWeight:400 }}>· checklist du {i.date}</span></div>
+              </div>
+              <button onClick={()=>setResolving(i)} style={{ background:CK_C.successSoft, border:`1px solid ${CK_C.success}`, borderRadius:8, color:CK_C.success, padding:"8px 12px", fontSize:12, fontWeight:800, flexShrink:0 }}>Résolu</button>
+            </div>
+          ))}
+        </div>
+      ))}
+      {resolving&&<ResolveSheet issue={resolving} checklists={checklists} tpmrVslTemplate={tpmrVslTemplate} stockInit={stockInit} onClose={()=>setResolving(null)}/>}
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════
+// CHECKLIST (mensuelle) — Scellé, ambulances, puis TPMR / VSL.
+// Une checklist envoyée disparaît de la liste ; elle revient vierge le
+// 1er du mois suivant (la clé du document change avec le mois).
 // ═══════════════════════════════════════════════════════════════
 function ChecklistHome({ onBack, onSettings, onHistory, checklists, emails, tpmrVslTemplate, sealedTemplates, stockInit, themeMode, toggleTheme }) {
   const [selected, setSelected] = useState(null);
   const [selectedTpmrVsl, setSelectedTpmrVsl] = useState(null);
-  const [screen, setScreen] = useState("home"); // home | tpmrvsl_list | scelle | bureau
+  const [screen, setScreen] = useState("home"); // home | scelle | bureau
   const tpmrChecklists = buildTpmrChecklists(tpmrVslTemplate);
   const hasTpmr = Object.keys(tpmrChecklists).length > 0;
   const statuses = useChecklistsMonthStatus(checklists);
@@ -2233,32 +2369,40 @@ function ChecklistHome({ onBack, onSettings, onHistory, checklists, emails, tpmr
   if (selectedTpmrVsl && tpmrChecklists[selectedTpmrVsl]) return <ChecklistView vehicleName={selectedTpmrVsl} onBack={()=>setSelectedTpmrVsl(null)} checklists={tpmrChecklists} emails={emails} stockInit={stockInit} themeMode={themeMode} toggleTheme={toggleTheme}/>;
   if (screen==="scelle") return <SealedList onBack={()=>setScreen("home")} emails={emails} themeMode={themeMode} toggleTheme={toggleTheme}/>;
   if (screen==="bureau") return <BureauView onBack={()=>setScreen("home")} checklists={checklists} sealedTemplates={sealedTemplates} themeMode={themeMode} toggleTheme={toggleTheme}/>;
-  if (screen==="tpmrvsl_list") return(
-    <Page>
-      <TopBar title="♿ Sac TPMR/VSL" subtitle={`${monthYearLabel(monthKey)} — modèle unique partagé`} onBack={()=>setScreen("home")} themeMode={themeMode} toggleTheme={toggleTheme}/>
-      <div style={{ flex:1, padding:"20px", maxWidth:480, margin:"0 auto", width:"100%" }}>
-        {!hasTpmr&&<div style={{ textAlign:"center", color:CK_C.muted, padding:40 }}>Aucun modèle défini — configure-le dans Paramètres → Checklists → Sac TPMR/VSL</div>}
-        <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
-          {hasTpmr&&TPMR_VSL_VEHICLES.map(v=>{
-            const st=tpmrVslStatuses[v];
-            const dotColor=st?.complete?CK_C.success:st?.started?"#f59e0b":CK_C.muted;
-            const dotLabel=st?.complete?"✅ Complète":st?.started?`🟠 En cours (${st.progress}%)`:"Non commencée";
-            return(
-              <button key={v} onClick={()=>setSelectedTpmrVsl(v)} style={{ background:CK_C.panel, border:`1px solid ${st?.complete?CK_C.success:st?.started?"#f59e0b":CK_C.border}`, borderRadius:13, padding:"14px 18px", color:CK_C.text, textAlign:"left", display:"flex", alignItems:"center", justifyContent:"space-between", cursor:"pointer" }}>
-                <div style={{ display:"flex", alignItems:"center", gap:10 }}>
-                  <div style={{ width:36, height:36, background:CK_C.red, borderRadius:9, display:"flex", alignItems:"center", justifyContent:"center", fontSize:18 }}>♿</div>
-                  <div><div style={{ fontWeight:700, fontSize:14 }}>{v}</div><div style={{ fontSize:11, fontWeight:700, color:dotColor }}>{dotLabel}</div></div>
-                </div>
-                <span style={{ color:CK_C.muted, fontSize:18 }}>→</span>
-              </button>
-            );
-          })}
-        </div>
-      </div>
-    </Page>
-  );
 
   const sealedStarted = sealedTasks.some(t=>sealedStatuses[t.id]?.started);
+  const byName=(a,b)=>a.localeCompare(b,"fr",{numeric:true});
+  const ambTodo = Object.keys(checklists).filter(n=>!statuses[n]?.sent).sort(byName);
+  const tpmrTodo = TPMR_VSL_VEHICLES.filter(n=>tpmrChecklists[n]&&!tpmrVslStatuses[n]?.sent);
+
+  const groupTitle=(label)=>(
+    <div style={{ fontSize:11, fontWeight:800, color:CK_C.muted, textTransform:"uppercase", letterSpacing:"1.2px", margin:"14px 0 2px" }}>{label}</div>
+  );
+  const allDone=(
+    <div style={{ background:CK_C.successSoft, border:`1px solid ${CK_C.success}`, borderRadius:12, padding:"14px", textAlign:"center", fontWeight:700, fontSize:13, color:CK_C.success }}>Toutes les checklists sont faites ✅</div>
+  );
+  const row=(name, st, icon, onClick, sub)=>{
+    const dotColor = st?.complete ? CK_C.success : st?.started ? "#f59e0b" : CK_C.muted;
+    const dotLabel = st?.complete ? "✅ Complète — à envoyer" : st?.started ? `🟠 En cours (${st.progress}%)` : "Non commencée";
+    return(
+      <button key={name} onClick={onClick}
+        style={{ background:CK_C.panel, border:`1px solid ${st?.complete?CK_C.success:st?.started?"#f59e0b":CK_C.border}`, borderRadius:13, padding:"16px 20px", color:CK_C.text, textAlign:"left", display:"flex", alignItems:"center", justifyContent:"space-between", cursor:"pointer" }}>
+        <div style={{ display:"flex", alignItems:"center", gap:12 }}>
+          <div style={{ width:42, height:42, background:CK_C.red, borderRadius:10, display:"flex", alignItems:"center", justifyContent:"center", fontSize:22, position:"relative" }}>
+            {icon}
+            <div style={{ position:"absolute", bottom:-2, right:-2, width:14, height:14, borderRadius:"50%", background:dotColor, border:`2px solid ${CK_C.panel}` }}/>
+          </div>
+          <div>
+            <div style={{ fontWeight:800, fontSize:16 }}>{name}</div>
+            {sub&&<div style={{ fontSize:11, color:CK_C.muted }}>{sub}</div>}
+            <div style={{ fontSize:11, fontWeight:700, color:dotColor, marginTop:2 }}>{dotLabel}</div>
+          </div>
+        </div>
+        <span style={{ color:CK_C.muted, fontSize:20 }}>→</span>
+      </button>
+    );
+  };
+
   return (
     <Page>
       <TopBar title="📋 Checklist" subtitle="Sélectionnez votre véhicule" onBack={onBack} themeMode={themeMode} toggleTheme={toggleTheme} onBureau={()=>setScreen("bureau")} onSettings={onSettings} onHistory={onHistory}/>
@@ -2280,44 +2424,16 @@ function ChecklistHome({ onBack, onSettings, onHistory, checklists, emails, tpmr
               <span style={{ color:CK_C.muted, fontSize:20 }}>→</span>
             </div>
           </button>
-          {Object.keys(checklists).sort((a,b)=>{
-            const aDone=statuses[a]?.complete?1:0;
-            const bDone=statuses[b]?.complete?1:0;
-            if(aDone!==bDone) return aDone-bDone;
-            return a.localeCompare(b);
-          }).map(name => {
-            const st = statuses[name];
-            const dotColor = st?.complete ? CK_C.success : st?.started ? "#f59e0b" : CK_C.muted;
-            const dotLabel = st?.complete ? "✅ Complète" : st?.started ? `🟠 En cours (${st.progress}%)` : "Non commencée";
-            return(
-            <button key={name} onClick={() => setSelected(name)}
-              style={{ background:CK_C.panel, border:`1px solid ${st?.complete?CK_C.success:st?.started?"#f59e0b":CK_C.border}`, borderRadius:13, padding:"16px 20px", color:CK_C.text, textAlign:"left", display:"flex", alignItems:"center", justifyContent:"space-between", cursor:"pointer" }}>
-              <div style={{ display:"flex", alignItems:"center", gap:12 }}>
-                <div style={{ width:42, height:42, background:CK_C.red, borderRadius:10, display:"flex", alignItems:"center", justifyContent:"center", fontSize:22, position:"relative" }}>
-                  🚑
-                  <div style={{ position:"absolute", bottom:-2, right:-2, width:14, height:14, borderRadius:"50%", background:dotColor, border:`2px solid ${CK_C.panel}` }}/>
-                </div>
-                <div>
-                  <div style={{ fontWeight:800, fontSize:16 }}>{name}</div>
-                  <div style={{ fontSize:11, color:CK_C.muted }}>Norme {checklists[name].norme}</div>
-                  <div style={{ fontSize:11, fontWeight:700, color:dotColor, marginTop:2 }}>{dotLabel}</div>
-                </div>
-              </div>
-              <span style={{ color:CK_C.muted, fontSize:20 }}>→</span>
-            </button>
-            );
-          })}
+
+          {groupTitle("Ambulances")}
+          {ambTodo.length===0&&allDone}
+          {ambTodo.map(name=>row(name, statuses[name], "🚑", ()=>setSelected(name), `Norme ${checklists[name].norme}`))}
+
+          {groupTitle("TPMR / VSL")}
+          {!hasTpmr&&<div style={{ textAlign:"center", color:CK_C.muted, padding:"14px 6px", fontSize:12 }}>Aucun modèle défini — configure-le dans Paramètres → Checklists → Sac TPMR/VSL</div>}
+          {hasTpmr&&tpmrTodo.length===0&&allDone}
+          {tpmrTodo.map(name=>row(name, tpmrVslStatuses[name], "♿", ()=>setSelectedTpmrVsl(name), null))}
         </div>
-        <button onClick={()=>setScreen("tpmrvsl_list")} style={{ width:"100%", marginTop:14, background:CK_C.panel, border:`1.5px solid ${CK_C.border}`, borderRadius:13, padding:"16px 20px", color:CK_C.text, textAlign:"left", display:"flex", alignItems:"center", justifyContent:"space-between", cursor:"pointer" }}>
-          <div style={{ display:"flex", alignItems:"center", gap:12 }}>
-            <div style={{ width:42, height:42, background:CK_C.panel2, border:`1px solid ${CK_C.border}`, borderRadius:10, display:"flex", alignItems:"center", justifyContent:"center", fontSize:22 }}>♿</div>
-            <div>
-              <div style={{ fontWeight:800, fontSize:16 }}>TPMR / VSL</div>
-              <div style={{ fontSize:11, color:CK_C.muted }}>Sac — check mensuelle, modèle unique</div>
-            </div>
-          </div>
-          <span style={{ color:CK_C.muted, fontSize:20 }}>→</span>
-        </button>
       </div>
     </Page>
   );
@@ -2945,8 +3061,9 @@ function HomeView({ onGo, onSettings, onHistory, checklistsData, tpmrVslTemplate
   const tpmrChecklists=buildTpmrChecklists(tpmrVslTemplate);
   const tpmrStatuses=useChecklistsMonthStatus(tpmrChecklists);
   const sealedTasks=useSealedTasks();
-  const pending=Object.keys(checklistsData).filter(n=>!ambStatuses[n]?.complete).length
-    +Object.keys(tpmrChecklists).filter(n=>!tpmrStatuses[n]?.complete).length
+  const openIssues=useOpenIssues();
+  const pending=Object.keys(checklistsData).filter(n=>!ambStatuses[n]?.sent).length
+    +Object.keys(tpmrChecklists).filter(n=>!tpmrStatuses[n]?.sent).length
     +sealedTasks.length;
   const lowTotal=allVehicleNames(checklistsData).reduce((s,v)=>{
     if(!(stockInit&&stockInit[v])) return s;
@@ -2965,7 +3082,7 @@ function HomeView({ onGo, onSettings, onHistory, checklistsData, tpmrVslTemplate
       <TopBar title="A.P.S." subtitle="Checklist & Réappro" themeMode={themeMode} toggleTheme={toggleTheme} onSettings={onSettings} onHistory={onHistory}/>
       <div style={{ flex:1, padding:"24px 18px", maxWidth:720, margin:"0 auto", width:"100%", display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(220px,1fr))", gap:18, alignContent:"center" }}>
         {tile("📋","Checklist","Contrôle mensuel des véhicules","checklist",pending,"#f59e0b")}
-        {tile("📦","Réappro","O₂ · produits des véhicules · remarques","reappro",lowTotal)}
+        {tile("📦","Réappro","O₂ · produits des véhicules · remarques","reappro",lowTotal+openIssues.length)}
       </div>
     </Page>
   );
