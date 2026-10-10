@@ -1282,7 +1282,7 @@ function O2HistoriqueSubView({ onBack, themeMode, toggleTheme }){
             <div key={s} style={{ flex:1, background:low?CK_C.dangerSoft:CK_C.panel, border:`1px solid ${low?CK_C.danger:CK_C.border}`, borderRadius:12, padding:"10px", textAlign:"center" }}>
               <div style={{ fontSize:18, fontWeight:900, color:low?CK_C.danger:"#3b82f6" }}>{reserve.pleines[s]||0}</div>
               <div style={{ fontSize:9, color:low?CK_C.danger:CK_C.muted, fontWeight:700 }}>{s} pleines</div>
-              <div style={{ fontSize:14, fontWeight:800, color:CK_C.muted, marginTop:4 }}>{reserve.vides[s]||0}</div>
+              <div style={{ fontSize:18, fontWeight:900, color:CK_C.muted, marginTop:8, paddingTop:8, borderTop:`1px solid ${CK_C.border}` }}>{reserve.vides[s]||0}</div>
               <div style={{ fontSize:9, color:CK_C.muted, fontWeight:700 }}>{s} vides</div>
             </div>
           );
@@ -2868,6 +2868,55 @@ function SealedTemplatesEditor({ templates, setTemplates }){
 }
 
 // ═══════════════════════════════════════════════════════════════
+// PARAMÈTRES → VÉHICULES : ajouter / retirer les TPMR-VSL et les véhicules O₂.
+// (Les ambulances se gèrent dans l'onglet Checklists.)
+// ═══════════════════════════════════════════════════════════════
+const DEFAULT_VEHICLE_LISTS={ tpmr:[...TPMR_VSL_VEHICLES], o2:[...O2_VEHICLES] };
+
+function VehicleListEditor({ title, hint, list, onChange, placeholder, protectedNames }){
+  const C=CK_C;
+  const [name,setName]=useState("");
+  const clean=name.replace(/\//g,"-").trim();
+  const exists=list.some(v=>v.toLowerCase()===clean.toLowerCase())||(protectedNames||[]).some(v=>v.toLowerCase()===clean.toLowerCase());
+  const add=()=>{ if(!clean||exists) return; onChange([...list,clean]); setName(""); };
+  const remove=(v)=>{
+    if(!window.confirm(`Retirer « ${v} » ? Il disparaît des écrans (Checklist, Réappro, O₂). Son historique reste consultable.`)) return;
+    onChange(list.filter(x=>x!==v));
+  };
+  return(
+    <div style={{ background:C.panel, border:`1px solid ${C.border}`, borderRadius:12, padding:14, marginBottom:18 }}>
+      <div style={{ fontWeight:800, fontSize:14, marginBottom:2 }}>{title}</div>
+      <div style={{ fontSize:11, color:C.muted, marginBottom:12 }}>{hint}</div>
+      {list.length===0&&<div style={{ fontSize:12, color:C.muted, marginBottom:10 }}>Aucun véhicule.</div>}
+      {list.map(v=>(
+        <div key={v} style={{ display:"flex", alignItems:"center", justifyContent:"space-between", padding:"8px 0", borderTop:`1px solid ${C.border}` }}>
+          <div style={{ fontSize:13, fontWeight:700 }}>{v}</div>
+          <button onClick={()=>remove(v)} style={{ background:C.dangerSoft, border:`1px solid ${C.danger}`, borderRadius:7, color:C.danger, padding:"6px 10px", fontSize:12 }}>🗑</button>
+        </div>
+      ))}
+      <div style={{ display:"flex", gap:8, marginTop:12 }}>
+        <input value={name} onChange={e=>setName(e.target.value)} placeholder={placeholder} style={{ flex:1, minWidth:0, background:C.bg, color:C.text, fontSize:13, border:`1px solid ${exists?C.danger:C.border}`, borderRadius:8, padding:"9px 10px" }}/>
+        <button onClick={add} disabled={!clean||exists} style={{ background:clean&&!exists?C.accent:C.border, border:"none", borderRadius:8, color:"white", padding:"9px 14px", fontWeight:800, fontSize:13 }}>+ Ajouter</button>
+      </div>
+      {exists&&<div style={{ fontSize:11, color:C.danger, marginTop:6 }}>Ce nom existe déjà.</div>}
+    </div>
+  );
+}
+
+function VehiclesEditor({ vehicleLists, setVehicleLists, ambulanceNames }){
+  const lists=vehicleLists||DEFAULT_VEHICLE_LISTS;
+  const set=(k,v)=>setVehicleLists({ ...lists, [k]:v });
+  return(
+    <div>
+      <SectionTitle icon="🚐" title="Véhicules"/>
+      <div style={{ fontSize:12, color:CK_C.muted, marginBottom:14 }}>Les ambulances se créent et se suppriment dans l'onglet Checklists. Ici : les TPMR / VSL et les véhicules de l'O₂. Un nouveau véhicule apparaît tout de suite ; pour le stock, pense à « Initialiser le stock » dans Réappro.</div>
+      <VehicleListEditor title="♿ TPMR / VSL" hint="Tous ont la même checklist (Paramètres → Checklists → Sac TPMR/VSL)." list={lists.tpmr||[]} onChange={v=>set("tpmr",v)} placeholder="Ex : TPMR 9" protectedNames={ambulanceNames}/>
+      <VehicleListEditor title="O₂ — véhicules" hint="Véhicules proposés dans l'écran O₂ Réserve." list={lists.o2||[]} onChange={v=>set("o2",v)} placeholder="Ex : ALPHA 8"/>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════
 // IMPORT depuis DispatchAI (one shot, au lancement officiel de DispatchAI :
 // on récupère l'historique ici puis on supprime cette app)
 // ═══════════════════════════════════════════════════════════════
@@ -2928,7 +2977,7 @@ function EmailList({ icon, title, hint, list, setList }){
   );
 }
 
-function ParametresView({ checklistsData, setChecklistsData, tpmrVslTemplate, setTpmrVslTemplate, checklistEmails, setChecklistEmails, o2Emails, setO2Emails, peremptionEmails, setPeremptionEmails, stockEmails, setStockEmails, stockPct, setStockPct, sealedTemplates, setSealedTemplates, onBack, themeMode, toggleTheme }){
+function ParametresView({ checklistsData, setChecklistsData, tpmrVslTemplate, setTpmrVslTemplate, checklistEmails, setChecklistEmails, o2Emails, setO2Emails, peremptionEmails, setPeremptionEmails, stockEmails, setStockEmails, stockPct, setStockPct, sealedTemplates, setSealedTemplates, vehicleLists, setVehicleLists, onBack, themeMode, toggleTheme }){
   const [tab,setTab]=useState("emails");
   const [editingChecklist,setEditingChecklist]=useState(null); // {key, origKey, isNew, norme, edition, sections}
   const [confirmDeleteChecklist,setConfirmDeleteChecklist]=useState(null);
@@ -2965,7 +3014,7 @@ function ParametresView({ checklistsData, setChecklistsData, tpmrVslTemplate, se
   const removeItem=(sIdx,shIdx,itIdx)=>setEditingChecklist(p=>({...p,sections:p.sections.map((s,i)=>i===sIdx?{...s,shelves:s.shelves.map((sh,j)=>j===shIdx?{...sh,items:sh.items.filter((_,k)=>k!==itIdx)}:sh)}:s)}));
   const updateItem=(sIdx,shIdx,itIdx,field,val)=>setEditingChecklist(p=>({...p,sections:p.sections.map((s,i)=>i===sIdx?{...s,shelves:s.shelves.map((sh,j)=>j===shIdx?{...sh,items:sh.items.map((it,k)=>k===itIdx?{...it,[field]:val}:it)}:sh)}:s)}));
 
-  const TABS=[{id:"emails",icon:"✉️",label:"Emails"},{id:"checklists",icon:"📋",label:"Checklists"},{id:"scelles",icon:"🔒",label:"Scellés"},{id:"seuils",icon:"📉",label:"Seuils"},{id:"import",icon:"⬇️",label:"Importer"}];
+  const TABS=[{id:"emails",icon:"✉️",label:"Emails"},{id:"checklists",icon:"📋",label:"Checklists"},{id:"scelles",icon:"🔒",label:"Scellés"},{id:"vehicules",icon:"🚐",label:"Véhicules"},{id:"seuils",icon:"📉",label:"Seuils"},{id:"import",icon:"⬇️",label:"Importer"}];
   const runImport=async()=>{
     setConfirmImport(false);
     setImportBusy(true);
@@ -3119,6 +3168,7 @@ function ParametresView({ checklistsData, setChecklistsData, tpmrVslTemplate, se
               )}
             </div>
           )}
+        {tab==="vehicules"&&<VehiclesEditor vehicleLists={vehicleLists} setVehicleLists={setVehicleLists} ambulanceNames={Object.keys(checklistsData)}/>}
         {tab==="scelles"&&<SealedTemplatesEditor templates={sealedTemplates} setTemplates={setSealedTemplates}/>}
         {tab==="seuils"&&(
           <div>
@@ -3216,6 +3266,9 @@ export default function App(){
   const [stockInit,setStockInit]=useSettings("stockInit",{});
   const [stockPct,setStockPct]=useSettings("stockPct",30);
   const [sealedTemplates,setSealedTemplates]=useSettings("sealedTemplates",[]);
+  const [vehicleLists,setVehicleLists]=useSettings("vehicleLists",DEFAULT_VEHICLE_LISTS);
+  if(vehicleLists&&Array.isArray(vehicleLists.tpmr)) TPMR_VSL_VEHICLES.splice(0,TPMR_VSL_VEHICLES.length,...vehicleLists.tpmr);
+  if(vehicleLists&&Array.isArray(vehicleLists.o2)) O2_VEHICLES.splice(0,O2_VEHICLES.length,...vehicleLists.o2);
 
   // Alertes de péremption : vérifiées une fois au démarrage (dès que les
   // destinataires sont chargés), pas seulement à l'ouverture de l'écran Péremption.
@@ -3238,7 +3291,7 @@ export default function App(){
   if(view==="checklist") content=<ChecklistHome onBack={goHome} onSettings={openSettings} onHistory={openHistory} checklists={checklistsData} emails={checklistEmails} tpmrVslTemplate={tpmrVslTemplate} sealedTemplates={sealedTemplates} stockInit={stockInit} {...common}/>;
   else if(view==="reappro") content=<ReapproHome checklists={checklistsData} tpmrVslTemplate={tpmrVslTemplate} stockInit={stockInit} setStockInit={setStockInit} pct={stockPct} stockEmails={stockEmails} remarqueEmails={checklistEmails} o2Emails={o2Emails} onBack={goHome} onSettings={openSettings} onHistory={openHistory} {...common}/>;
   else if(view==="historique") content=<HistoriqueHome onBack={goHome} checklists={checklistsData} tpmrVslTemplate={tpmrVslTemplate} peremptionEmails={peremptionEmails} {...common}/>;
-  else if(view==="parametres") content=<ParametresView checklistsData={checklistsData} setChecklistsData={setChecklistsData} tpmrVslTemplate={tpmrVslTemplate} setTpmrVslTemplate={setTpmrVslTemplate} checklistEmails={checklistEmails} setChecklistEmails={setChecklistEmails} o2Emails={o2Emails} setO2Emails={setO2Emails} peremptionEmails={peremptionEmails} setPeremptionEmails={setPeremptionEmails} stockEmails={stockEmails} setStockEmails={setStockEmails} stockPct={stockPct} setStockPct={setStockPct} sealedTemplates={sealedTemplates} setSealedTemplates={setSealedTemplates} onBack={goHome} {...common}/>;
+  else if(view==="parametres") content=<ParametresView checklistsData={checklistsData} setChecklistsData={setChecklistsData} tpmrVslTemplate={tpmrVslTemplate} setTpmrVslTemplate={setTpmrVslTemplate} checklistEmails={checklistEmails} setChecklistEmails={setChecklistEmails} o2Emails={o2Emails} setO2Emails={setO2Emails} peremptionEmails={peremptionEmails} setPeremptionEmails={setPeremptionEmails} stockEmails={stockEmails} setStockEmails={setStockEmails} stockPct={stockPct} setStockPct={setStockPct} sealedTemplates={sealedTemplates} setSealedTemplates={setSealedTemplates} vehicleLists={vehicleLists} setVehicleLists={setVehicleLists} onBack={goHome} {...common}/>;
   else content=<HomeView onGo={setView} onSettings={openSettings} onHistory={openHistory} checklistsData={checklistsData} tpmrVslTemplate={tpmrVslTemplate} stockInit={stockInit} stockPct={stockPct} {...common}/>;
 
   return <StockProvider>{content}</StockProvider>;
