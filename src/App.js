@@ -286,7 +286,7 @@ async function logMovement(m){
 // Entrée / sortie d'un produit. Sortie : on retire d'abord le lot qui périme
 // le plus tôt (FEFO), ou le lot précis demandé (lotId). Le stock ne descend
 // jamais sous 0 ; si on demande plus que le stock affiché, l'écart est noté.
-async function applyStockMovement({ vehicle, itemName, type, qty, date, by, lotId, minValue, emails }){
+async function applyStockMovement({ vehicle, itemName, type, qty, date, by, lotId, minValue, emails, sealed }){
   const ref=doc(dbChecklists,STOCK_COL,peremptionKey(vehicle,itemName));
   const snap=await getDoc(ref);
   const cur=snap.exists()?snap.data():{ vehicle, itemName, lots:[] };
@@ -319,7 +319,7 @@ async function applyStockMovement({ vehicle, itemName, type, qty, date, by, lotI
     lots=lots.filter(l=>(l.quantite||0)>0);
   }
   const after=lotsTotal(lots);
-  await setDoc(ref, sanitizeUndefined({ ...cur, vehicle, itemName, lots }));
+  await setDoc(ref, sanitizeUndefined({ ...cur, vehicle, itemName, lots, ...(sealed?{ sealed:true }:{}) }));
   await logMovement({ type, vehicle, itemName, qty, lotDate:date||"", by, stockBefore:before, stockAfter:after, shortfall });
   // Alerte stock bas : uniquement au moment où le seuil est franchi (pas de doublon).
   if(type==="sortie" && minValue>0 && before>=minValue && after<minValue && emails && emails.length>0){
@@ -336,14 +336,14 @@ async function applyStockMovement({ vehicle, itemName, type, qty, date, by, lotI
 }
 
 // Correction manuelle : remplace la liste des lots d'un produit.
-async function applyStockCorrection({ vehicle, itemName, lots, by }){
+async function applyStockCorrection({ vehicle, itemName, lots, by, sealed }){
   const ref=doc(dbChecklists,STOCK_COL,peremptionKey(vehicle,itemName));
   const snap=await getDoc(ref);
   const cur=snap.exists()?snap.data():{ vehicle, itemName, lots:[] };
   const before=lotsTotal(cur.lots);
   const clean=lots.filter(l=>(l.quantite||0)>0).map(l=>({ id:l.id||("lot"+Date.now()+Math.floor(Math.random()*1000)), quantite:l.quantite, date:l.date||"" }));
   const after=lotsTotal(clean);
-  await setDoc(ref, sanitizeUndefined({ ...cur, vehicle, itemName, lots:clean }));
+  await setDoc(ref, sanitizeUndefined({ ...cur, vehicle, itemName, lots:clean, ...(sealed?{ sealed:true }:{}) }));
   await logMovement({ type:"correction", vehicle, itemName, qty:after-before, by, stockBefore:before, stockAfter:after });
 }
 
@@ -1713,7 +1713,7 @@ async function checkAndSendPeremptionAlerts(checklistsData, peremptionEmails){
       const already=new Set(data.expiredNotified||[]);
       const fresh=(data.lots||[]).filter(l=>l.date&&l.date<=cur&&(l.quantite||0)>0&&!already.has(l.id));
       if(fresh.length===0) continue;
-      fresh.forEach(l=>found.push({ vehicle:data.vehicle, itemName:data.itemName, quantite:l.quantite, date:l.date }));
+      fresh.forEach(l=>found.push({ vehicle:data.vehicle, itemName:data.itemName, quantite:l.quantite, date:l.date, sealed:!!data.sealed }));
       toMark.push({ id:d.id, data, ids:fresh.map(l=>l.id) });
     }
     if(found.length===0) return;
@@ -1729,6 +1729,10 @@ async function checkAndSendPeremptionAlerts(checklistsData, peremptionEmails){
     const lines=Object.keys(byVehicle).sort((a,b)=>a.localeCompare(b,"fr",{numeric:true})).map(v=>{
       const items=byVehicle[v].sort((a,b)=>a.date.localeCompare(b.date)||a.itemName.localeCompare(b.itemName,"fr"))
         .map(f=>`   • ${f.itemName} — ${f.quantite}× (péremption ${monthYearLabel(f.date)})`).join("\n");
+      if(byVehicle[v][0].sealed){
+        const seal=byVehicle[v].map(f=>f.date).sort()[0];
+        return `🔒 ${v} — scellé à rouvrir (date du scellé : ${monthYearLabel(seal)})\n${items}`;
+      }
       return `🚑 ${v}\n${items}`;
     }).join("\n\n");
     const content=`Produits périmés à remplacer (${found.length} lot${found.length>1?"s":""}) :\n\n${lines}`;
@@ -1755,7 +1759,7 @@ function Stepper({ value, onChange, min=1, max=999 }){
 }
 
 // Fiche produit : entrée / sortie (nom obligatoire), seuil, correction du stock.
-function ProductSheet({ vehicle, entry, stockDoc, pct, initialised, stockEmails, onClose, onSaved }){
+function ProductSheet({ vehicle, entry, stockDoc, pct, initialised, stockEmails, onClose, onSaved, sealed }){
   const [mode,setMode]=useState("sortie"); // sortie | entree | correction
   const [qty,setQty]=useState(1);
   const [date,setDate]=useState("");
@@ -1769,7 +1773,7 @@ function ProductSheet({ vehicle, entry, stockDoc, pct, initialised, stockEmails,
   const minEff=effectiveMin(stockDoc,entry.q,pct);
   const low=initialised && minEff>0 && total<minEff;
   const nameOk=name.trim().length>0;
-  const dateOk=mode!=="entree"||!entry.p||date.length>0;
+  const dateOk=mode==="entree"?(!entry.p||date.length>0):mode==="correction"?(!entry.p||corrLots.every(l=>(l.quantite||0)<=0||!!l.date)):true;
   const qtyOk=mode==="correction"?true:qty>0;
   const canSave=nameOk&&dateOk&&qtyOk&&!saving;
 
@@ -1778,10 +1782,10 @@ function ProductSheet({ vehicle, entry, stockDoc, pct, initialised, stockEmails,
     setSaving(true);
     try{
       if(mode==="correction"){
-        await applyStockCorrection({ vehicle, itemName:entry.name, lots:corrLots, by:name.trim() });
+        await applyStockCorrection({ vehicle, itemName:entry.name, lots:corrLots, by:name.trim(), sealed });
         onSaved(`✅ Stock corrigé : ${entry.name}`);
       }else{
-        const r=await applyStockMovement({ vehicle, itemName:entry.name, type:mode, qty, date:mode==="entree"?date:"", by:name.trim(), minValue:initialised?minEff:0, emails:stockEmails });
+        const r=await applyStockMovement({ vehicle, itemName:entry.name, type:mode, qty, date:mode==="entree"?date:"", by:name.trim(), minValue:initialised?minEff:0, emails:stockEmails, sealed });
         onSaved(`✅ ${mode==="entree"?"Entrée":"Sortie"} enregistrée : ${qty} × ${entry.name} (stock ${r.after})`);
       }
       rememberName(name);
@@ -1866,10 +1870,12 @@ function ProductSheet({ vehicle, entry, stockDoc, pct, initialised, stockEmails,
           {saving?"Enregistrement…":!nameOk?"Indique ton nom":!dateOk?"Date de péremption requise":"✅ Enregistrer"}
         </button>
 
+        {!sealed&&(
         <div style={{ marginTop:16, paddingTop:12, borderTop:`1px solid ${CK_C.border}`, display:"flex", alignItems:"center", justifyContent:"space-between", gap:10 }}>
           <div style={{ fontSize:12, color:CK_C.muted }}>Seuil minimum<div style={{ fontSize:10 }}>vide = seuil par défaut ({pct||0}% → {Math.ceil(entry.q*(pct||0)/100)})</div></div>
           <input type="number" min="0" value={minInput} onChange={e=>setMinInput(e.target.value)} onBlur={saveMin} placeholder="défaut" style={{ width:90, background:CK_C.bg, border:`1px solid ${CK_C.border}`, borderRadius:8, padding:"9px", color:CK_C.text, fontSize:14, textAlign:"center" }}/>
         </div>
+        )}
       </div>
     </div>
   );
@@ -2084,12 +2090,13 @@ function RemarqueModal({ emails, onClose }){
 }
 
 // Accueil Réappro : 3 icônes — O₂, Réappro véhicules, Remarque
-function ReapproHome({ checklists, tpmrVslTemplate, stockInit, setStockInit, pct, stockEmails, remarqueEmails, o2Emails, onBack, onSettings, onHistory, themeMode, toggleTheme }){
+function ReapproHome({ sealedTemplates, checklists, tpmrVslTemplate, stockInit, setStockInit, pct, stockEmails, remarqueEmails, o2Emails, onBack, onSettings, onHistory, themeMode, toggleTheme }){
   const stockMap=useStockMap();
-  const [screen,setScreen]=useState("home"); // home | o2 | veh
+  const [screen,setScreen]=useState("home"); // home | o2 | veh | sealed
   const [showRemarque,setShowRemarque]=useState(false);
 
   if(screen==="o2") return <O2ReserveView onBack={()=>setScreen("home")} themeMode={themeMode} toggleTheme={toggleTheme} emails={o2Emails}/>;
+  if(screen==="sealed") return <SealedBagBrowser mode="stock" sealedTemplates={sealedTemplates} checklists={checklists} stockEmails={stockEmails} onBack={()=>setScreen("home")} themeMode={themeMode} toggleTheme={toggleTheme}/>;
   if(screen==="veh") return <ReapproVehicules checklists={checklists} tpmrVslTemplate={tpmrVslTemplate} stockInit={stockInit} setStockInit={setStockInit} pct={pct} stockEmails={stockEmails} onBack={()=>setScreen("home")} themeMode={themeMode} toggleTheme={toggleTheme}/>;
 
   const lowTotal=allVehicleNames(checklists).reduce((s,v)=>{
@@ -2110,6 +2117,7 @@ function ReapproHome({ checklists, tpmrVslTemplate, stockInit, setStockInit, pct
       <div style={{ padding:20, maxWidth:560, margin:"0 auto", width:"100%", display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(150px,1fr))", gap:14 }}>
         {tile(<span style={{ color:"#3b82f6", fontWeight:900 }}>O₂</span>,"O₂","Réserve de bouteilles",()=>setScreen("o2"),0)}
         {tile("🚑","Réappro véhicules","Entrées et sorties de produits",()=>setScreen("veh"),lowTotal)}
+        {tile("🔒","Scellé","Sacs et armoires scellés",()=>setScreen("sealed"),0)}
         {tile("📝","Remarque","Message au responsable",()=>setShowRemarque(true),0)}
       </div>
       <ManquementsList checklists={checklists} tpmrVslTemplate={tpmrVslTemplate} stockInit={stockInit}/>
@@ -2236,7 +2244,7 @@ function SealedList({ onBack, emails, themeMode, toggleTheme }){
 }
 
 // ── Bureau : déclencher une checklist scellée pour un ou plusieurs véhicules ──
-function BureauView({ onBack, checklists, sealedTemplates, themeMode, toggleTheme }){
+function BureauSend({ onBack, checklists, sealedTemplates, themeMode, toggleTheme }){
   const tasks=useSealedTasks();
   const [tpl,setTpl]=useState(null);
   const [picked,setPicked]=useState([]);
@@ -2454,6 +2462,156 @@ function ManquementsList({ checklists, tpmrVslTemplate, stockInit }){
       ))}
       {resolving&&<ResolveSheet issue={resolving} checklists={checklists} tpmrVslTemplate={tpmrVslTemplate} stockInit={stockInit} onClose={()=>setResolving(null)}/>}
     </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════
+// SACS SCELLÉS — navigation : modèle (sac pédiatrique, Kata…) → véhicule → contenu du sac.
+//  mode "view"  (Bureau)  : consultation, dates en rouge dès le mois de péremption
+//  mode "stock" (Réappro) : un clic sur un produit ouvre la fiche Entrée / Sortie / Corriger
+// Seuls les produits à péremption (🗓 dans le modèle) sont suivis.
+// ═══════════════════════════════════════════════════════════════
+function sealedBagLabel(tpl, vehicle){ return `${tpl.name} — ${vehicle}`.replace(/\//g,"-"); }
+function sealedBagEntries(tpl, vehicle){
+  const label=sealedBagLabel(tpl,vehicle);
+  const list=[];
+  const seen={};
+  (tpl.sections||[]).forEach(sec=>(sec.shelves||[]).forEach(sh=>(sh.items||[]).forEach(it=>{
+    if(!it.n||!it.n.trim()||!it.p||seen[it.n]) return;
+    seen[it.n]=true;
+    list.push({ name:it.n, q:it.q||1, p:true, section:sec.label, shelf:"", key:peremptionKey(label,it.n) });
+  })));
+  return list;
+}
+function sealedBagSoonest(stockMap, entries){
+  return getSoonestDate(entries.flatMap(e=>((stockMap[e.key]&&stockMap[e.key].lots)||[])));
+}
+
+function SealedBagView({ tpl, vehicle, mode, stockEmails, onBack, themeMode, toggleTheme }){
+  const stockMap=useStockMap();
+  const [sel,setSel]=useState(null);
+  const [toast,setToast]=useState(null);
+  const label=sealedBagLabel(tpl,vehicle);
+  const entries=sealedBagEntries(tpl,vehicle);
+  const cur=getChecklistMonthKey();
+  const soonest=sealedBagSoonest(stockMap,entries);
+  const due=!!soonest&&soonest<=cur;
+  const showToast=(m)=>{ setToast(m); setTimeout(()=>setToast(null),3500); };
+  const groups=[];
+  entries.forEach(e=>{
+    let g=groups[groups.length-1];
+    if(!g||g.label!==e.section){ g={label:e.section,items:[]}; groups.push(g); }
+    g.items.push(e);
+  });
+  return(
+    <Page>
+      <TopBar title={`🔒 ${label}`} subtitle={mode==="stock"?"Entrées et sorties":"Contenu du sac"} onBack={onBack} themeMode={themeMode} toggleTheme={toggleTheme}/>
+      <div style={{ flex:1, padding:"14px 14px 40px", maxWidth:640, margin:"0 auto", width:"100%" }}>
+        <div style={{ background:due?CK_C.dangerSoft:CK_C.panel, border:`1px solid ${due?CK_C.danger:CK_C.border}`, borderRadius:12, padding:"14px 16px", marginBottom:14, display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+          <div style={{ fontSize:12, fontWeight:700, color:CK_C.muted, textTransform:"uppercase" }}>Date du scellé</div>
+          <div style={{ fontSize:22, fontWeight:900, color:due?CK_C.danger:CK_C.text }}>{soonest?monthYearLabel(soonest):"—"}{due&&<span style={{ fontSize:12, marginLeft:8 }}>⚠ à rouvrir</span>}</div>
+        </div>
+        {toast&&<div style={{ background:CK_C.successSoft, border:`1px solid ${CK_C.success}`, borderRadius:10, padding:"10px 12px", marginBottom:12, fontSize:12, color:CK_C.success, fontWeight:700 }}>{toast}</div>}
+        {entries.length===0&&<div style={{ textAlign:"center", color:CK_C.muted, padding:40, fontSize:13 }}>Aucun produit à péremption dans ce modèle.<br/><span style={{ fontSize:11 }}>Active le 🗓 sur les produits concernés dans Paramètres → Scellés.</span></div>}
+        {groups.map(g=>(
+          <div key={g.label} style={{ marginBottom:14 }}>
+            <div style={{ fontSize:11, fontWeight:800, color:CK_C.muted, textTransform:"uppercase", letterSpacing:"1px", margin:"6px 2px 6px" }}>{g.label}</div>
+            {g.items.map(e=>{
+              const d=stockMap[e.key];
+              const lots=sortLots(d&&d.lots);
+              const rowDue=lots.some(l=>l.date&&l.date<=cur);
+              const Tag=mode==="stock"?"button":"div";
+              return(
+                <Tag key={e.key} onClick={mode==="stock"?()=>setSel(e):undefined} style={{ width:"100%", display:"flex", alignItems:"center", justifyContent:"space-between", gap:10, background:CK_C.panel, border:`1px solid ${rowDue?CK_C.danger:CK_C.border}`, borderRadius:11, padding:"11px 14px", marginBottom:6, color:CK_C.text, textAlign:"left", cursor:mode==="stock"?"pointer":"default" }}>
+                  <div style={{ flex:1, minWidth:0 }}>
+                    <div style={{ fontSize:14, fontWeight:700 }}>{e.name}</div>
+                    {lots.length===0&&<div style={{ fontSize:11, marginTop:2, color:CK_C.muted }}>date à renseigner</div>}
+                    {lots.map(l=>{
+                      const red=!!l.date&&l.date<=cur;
+                      return <div key={l.id} style={{ fontSize:12, marginTop:2, fontWeight:red?800:500, color:red?CK_C.danger:CK_C.muted }}>{l.quantite}× — {l.date?monthYearLabel(l.date):"date à renseigner"}{red?" ⚠ à remplacer":""}</div>;
+                    })}
+                  </div>
+                  <div style={{ textAlign:"right" }}>
+                    <div style={{ fontSize:18, fontWeight:900 }}>{lotsTotal(lots)}</div>
+                    <div style={{ fontSize:10, color:CK_C.muted }}>requis {e.q}</div>
+                  </div>
+                </Tag>
+              );
+            })}
+          </div>
+        ))}
+      </div>
+      {sel&&<ProductSheet key={sel.key} vehicle={label} entry={sel} stockDoc={stockMap[sel.key]} pct={0} initialised={false} stockEmails={stockEmails} sealed={true} onClose={()=>setSel(null)} onSaved={showToast}/>}
+    </Page>
+  );
+}
+
+function SealedBagBrowser({ mode, sealedTemplates, checklists, stockEmails, onBack, themeMode, toggleTheme }){
+  const stockMap=useStockMap();
+  const [tpl,setTpl]=useState(null);
+  const [vehicle,setVehicle]=useState(null);
+  const cur=getChecklistMonthKey();
+  const vehiclesFor=(t)=>t.target==="TPMR"?TPMR_VSL_VEHICLES:Object.keys(checklists).sort((a,b)=>a.localeCompare(b,"fr",{numeric:true}));
+
+  if(tpl&&vehicle) return <SealedBagView tpl={tpl} vehicle={vehicle} mode={mode} stockEmails={stockEmails} onBack={()=>setVehicle(null)} themeMode={themeMode} toggleTheme={toggleTheme}/>;
+
+  if(tpl) return(
+    <Page>
+      <TopBar title={`🔒 ${tpl.name}`} subtitle="Choisis le véhicule" onBack={()=>setTpl(null)} themeMode={themeMode} toggleTheme={toggleTheme}/>
+      <div style={{ padding:20, maxWidth:480, margin:"0 auto", width:"100%", display:"grid", gridTemplateColumns:"1fr 1fr", gap:10 }}>
+        {vehiclesFor(tpl).map(v=>{
+          const soonest=sealedBagSoonest(stockMap,sealedBagEntries(tpl,v));
+          const due=!!soonest&&soonest<=cur;
+          return(
+            <button key={v} onClick={()=>setVehicle(v)} style={{ background:CK_C.panel, border:`1px solid ${due?CK_C.danger:CK_C.border}`, borderRadius:14, padding:"18px 10px", color:CK_C.text, fontWeight:800, fontSize:16, display:"flex", flexDirection:"column", alignItems:"center", gap:5 }}>
+              <span>{tpl.target==="TPMR"?"♿":"🚑"} {v}</span>
+              <span style={{ fontSize:10, fontWeight:700, color:due?CK_C.danger:CK_C.muted }}>{soonest?`scellé : ${monthYearLabel(soonest)}${due?" ⚠":""}`:"pas de date"}</span>
+            </button>
+          );
+        })}
+      </div>
+    </Page>
+  );
+
+  return(
+    <Page>
+      <TopBar title="🔒 Sacs scellés" subtitle="Choisis le sac ou l'armoire" onBack={onBack} themeMode={themeMode} toggleTheme={toggleTheme}/>
+      <div style={{ padding:20, maxWidth:480, margin:"0 auto", width:"100%", display:"flex", flexDirection:"column", gap:10 }}>
+        {sealedTemplates.length===0&&<div style={{ textAlign:"center", color:CK_C.muted, padding:"40px 10px", fontSize:14 }}>Aucun modèle de sac / armoire.<br/><span style={{ fontSize:11 }}>Crée-en un dans Paramètres → Scellés.</span></div>}
+        {sealedTemplates.map(t=>(
+          <button key={t.id} onClick={()=>setTpl(t)} style={{ background:CK_C.panel, border:`1px solid ${CK_C.border}`, borderRadius:13, padding:"16px 20px", color:CK_C.text, textAlign:"left", display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+            <div>
+              <div style={{ fontWeight:800, fontSize:16 }}>🔒 {t.name}</div>
+              <div style={{ fontSize:11, color:CK_C.muted }}>{t.target==="TPMR"?"TPMR / VSL":"Ambulances"}</div>
+            </div>
+            <span style={{ color:CK_C.muted, fontSize:20 }}>→</span>
+          </button>
+        ))}
+      </div>
+    </Page>
+  );
+}
+
+// Bureau : deux entrées — envoyer une checklist de scellé / voir le contenu des sacs
+function BureauView({ onBack, checklists, sealedTemplates, themeMode, toggleTheme }){
+  const [section,setSection]=useState(null); // null | send | contenu
+  if(section==="send") return <BureauSend onBack={()=>setSection(null)} checklists={checklists} sealedTemplates={sealedTemplates} themeMode={themeMode} toggleTheme={toggleTheme}/>;
+  if(section==="contenu") return <SealedBagBrowser mode="view" sealedTemplates={sealedTemplates} checklists={checklists} onBack={()=>setSection(null)} themeMode={themeMode} toggleTheme={toggleTheme}/>;
+  const big=(icon,label,sub,onClick)=>(
+    <button onClick={onClick} style={{ width:"100%", background:CK_C.panel, border:`1px solid ${CK_C.border}`, borderRadius:16, padding:"22px 20px", color:CK_C.text, display:"flex", alignItems:"center", gap:16, textAlign:"left", marginBottom:12 }}>
+      <div style={{ fontSize:34 }}>{icon}</div>
+      <div style={{ flex:1 }}><div style={{ fontWeight:800, fontSize:17 }}>{label}</div><div style={{ fontSize:12, color:CK_C.muted, marginTop:2 }}>{sub}</div></div>
+      <span style={{ color:CK_C.muted, fontSize:20 }}>→</span>
+    </button>
+  );
+  return(
+    <Page>
+      <TopBar title="🏢 Bureau" subtitle="Sacs et armoires scellés" onBack={onBack} themeMode={themeMode} toggleTheme={toggleTheme}/>
+      <div style={{ padding:20, maxWidth:480, margin:"0 auto", width:"100%" }}>
+        {big("📤","Envoyer une checklist","Déclencher la checklist d'un sac ouvert",()=>setSection("send"))}
+        {big("🔍","Contenu des sacs","Produits et dates de chaque sac scellé",()=>setSection("contenu"))}
+      </div>
+    </Page>
   );
 }
 
@@ -3289,7 +3447,7 @@ export default function App(){
 
   let content;
   if(view==="checklist") content=<ChecklistHome onBack={goHome} onSettings={openSettings} onHistory={openHistory} checklists={checklistsData} emails={checklistEmails} tpmrVslTemplate={tpmrVslTemplate} sealedTemplates={sealedTemplates} stockInit={stockInit} {...common}/>;
-  else if(view==="reappro") content=<ReapproHome checklists={checklistsData} tpmrVslTemplate={tpmrVslTemplate} stockInit={stockInit} setStockInit={setStockInit} pct={stockPct} stockEmails={stockEmails} remarqueEmails={checklistEmails} o2Emails={o2Emails} onBack={goHome} onSettings={openSettings} onHistory={openHistory} {...common}/>;
+  else if(view==="reappro") content=<ReapproHome sealedTemplates={sealedTemplates} checklists={checklistsData} tpmrVslTemplate={tpmrVslTemplate} stockInit={stockInit} setStockInit={setStockInit} pct={stockPct} stockEmails={stockEmails} remarqueEmails={checklistEmails} o2Emails={o2Emails} onBack={goHome} onSettings={openSettings} onHistory={openHistory} {...common}/>;
   else if(view==="historique") content=<HistoriqueHome onBack={goHome} checklists={checklistsData} tpmrVslTemplate={tpmrVslTemplate} peremptionEmails={peremptionEmails} {...common}/>;
   else if(view==="parametres") content=<ParametresView checklistsData={checklistsData} setChecklistsData={setChecklistsData} tpmrVslTemplate={tpmrVslTemplate} setTpmrVslTemplate={setTpmrVslTemplate} checklistEmails={checklistEmails} setChecklistEmails={setChecklistEmails} o2Emails={o2Emails} setO2Emails={setO2Emails} peremptionEmails={peremptionEmails} setPeremptionEmails={setPeremptionEmails} stockEmails={stockEmails} setStockEmails={setStockEmails} stockPct={stockPct} setStockPct={setStockPct} sealedTemplates={sealedTemplates} setSealedTemplates={setSealedTemplates} vehicleLists={vehicleLists} setVehicleLists={setVehicleLists} onBack={goHome} {...common}/>;
   else content=<HomeView onGo={setView} onSettings={openSettings} onHistory={openHistory} checklistsData={checklistsData} tpmrVslTemplate={tpmrVslTemplate} stockInit={stockInit} stockPct={stockPct} {...common}/>;
