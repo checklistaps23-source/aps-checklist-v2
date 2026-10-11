@@ -107,7 +107,7 @@ const CK_C = { ...CK_DARK };
 function applyCkThemeMode(mode){ Object.assign(CK_C, mode==="light"?CK_LIGHT:CK_DARK); }
 applyCkThemeMode(getStoredThemeMode());
 
-const CK_GS=`@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&display=swap'); *{box-sizing:border-box;} button{cursor:pointer;font-family:inherit;} input,textarea{font-family:inherit;} input::placeholder{color:#4d6a8a;}`;
+const CK_GS=`@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&display=swap'); html,body{overscroll-behavior:none;} *{box-sizing:border-box;} button{cursor:pointer;font-family:inherit;} input,textarea{font-family:inherit;} input::placeholder{color:#4d6a8a;}`;
 
 // ═══════════════════════════════════════
 // HELPERS
@@ -163,7 +163,7 @@ function TopBar({ title, subtitle, onBack, themeMode, toggleTheme, onBureau, onS
   );
 }
 function Page({ children }){
-  return <div style={{ minHeight:"100vh", background:CK_C.bg, fontFamily:"'DM Sans',sans-serif", color:CK_C.text, display:"flex", flexDirection:"column" }}><style>{CK_GS}</style>{children}</div>;
+  return <div style={{ minHeight:"100dvh", background:CK_C.bg, fontFamily:"'DM Sans',sans-serif", color:CK_C.text, display:"flex", flexDirection:"column" }}><style>{CK_GS}</style>{children}</div>;
 }
 function Badge({ n, color }){
   if(!n) return null;
@@ -852,11 +852,11 @@ function ChecklistView({ vehicleName, onBack, checklists, emails, stockInit, sea
   };
 
   if (!loaded) return (
-    <div style={{ minHeight:"100vh", background:CK_C.bg, display:"flex", alignItems:"center", justifyContent:"center", color:CK_C.muted, fontFamily:"'DM Sans',sans-serif" }}>Chargement…</div>
+    <div style={{ minHeight:"100dvh", background:CK_C.bg, display:"flex", alignItems:"center", justifyContent:"center", color:CK_C.muted, fontFamily:"'DM Sans',sans-serif" }}>Chargement…</div>
   );
 
   if (submitted) return (
-    <div style={{ minHeight:"100vh", background:CK_C.bg, fontFamily:"'DM Sans',sans-serif", color:CK_C.text }}>
+    <div style={{ minHeight:"100dvh", background:CK_C.bg, fontFamily:"'DM Sans',sans-serif", color:CK_C.text }}>
       <div style={{ background:CK_C.panel, borderBottom:`1px solid ${CK_C.border}`, padding:"14px 18px", display:"flex", alignItems:"center", gap:12 }}>
         <button onClick={onBack} style={{ background:"transparent", border:`1px solid ${CK_C.border}`, borderRadius:8, color:CK_C.muted, padding:"6px 12px", fontSize:14 }}>←</button>
         <div style={{ fontWeight:800, fontSize:16 }}>📋 Rapport {vehicleName}</div>
@@ -907,7 +907,7 @@ function ChecklistView({ vehicleName, onBack, checklists, emails, stockInit, sea
   );
 
   return (
-    <div style={{ minHeight:"100vh", background:CK_C.bg, fontFamily:"'DM Sans',sans-serif", color:CK_C.text, display:"flex", flexDirection:"column" }}>
+    <div style={{ minHeight:"100dvh", background:CK_C.bg, fontFamily:"'DM Sans',sans-serif", color:CK_C.text, display:"flex", flexDirection:"column" }}>
       <div style={{ background:CK_C.panel, borderBottom:`1px solid ${CK_C.border}`, padding:"13px 16px", position:"sticky", top:0, zIndex:10 }}>
         <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:10 }}>
           <div style={{ display:"flex", alignItems:"center", gap:10 }}>
@@ -1189,7 +1189,7 @@ function ChecklistHistoriqueSubView({ onBack, themeMode, toggleTheme }){
   },[]);
 
   return(
-    <div style={{ minHeight:"100vh", background:CK_C.bg, fontFamily:"'DM Sans',sans-serif", color:CK_C.text, display:"flex", flexDirection:"column" }}>
+    <div style={{ minHeight:"100dvh", background:CK_C.bg, fontFamily:"'DM Sans',sans-serif", color:CK_C.text, display:"flex", flexDirection:"column" }}>
       <style>{CK_GS}</style>
       <div style={{ background:CK_C.panel, borderBottom:`1px solid ${CK_C.border}`, padding:"14px 16px", display:"flex", alignItems:"center", justifyContent:"space-between", flexWrap:"wrap", gap:10, position:"sticky", top:0, zIndex:10 }}>
         <div style={{ display:"flex", alignItems:"center", gap:10 }}>
@@ -1266,7 +1266,7 @@ function O2HistoriqueSubView({ onBack, themeMode, toggleTheme }){
   },[]);
 
   return(
-    <div style={{ minHeight:"100vh", background:CK_C.bg, fontFamily:"'DM Sans',sans-serif", color:CK_C.text, display:"flex", flexDirection:"column" }}>
+    <div style={{ minHeight:"100dvh", background:CK_C.bg, fontFamily:"'DM Sans',sans-serif", color:CK_C.text, display:"flex", flexDirection:"column" }}>
       <style>{CK_GS}</style>
       <div style={{ background:CK_C.panel, borderBottom:`1px solid ${CK_C.border}`, padding:"14px 16px", display:"flex", alignItems:"center", justifyContent:"space-between", flexWrap:"wrap", gap:10, position:"sticky", top:0, zIndex:10 }}>
         <div style={{ display:"flex", alignItems:"center", gap:10 }}>
@@ -1579,7 +1579,7 @@ function O2ReserveView({ onBack, themeMode, toggleTheme, emails }){
     };
     const box={ background:CK_C.panel, border:`1px solid ${CK_C.border}`, borderRadius:12, padding:"16px", marginBottom:14 };
     return(
-      <div style={{ minHeight:"100vh", background:CK_C.bg, fontFamily:"'DM Sans',sans-serif", color:CK_C.text, display:"flex", flexDirection:"column" }}>
+      <div style={{ minHeight:"100dvh", background:CK_C.bg, fontFamily:"'DM Sans',sans-serif", color:CK_C.text, display:"flex", flexDirection:"column" }}>
         <style>{CK_GS}</style>
         {headerBar("✏️ Corriger l'O₂")}
         <div style={{ flex:1, padding:"18px", maxWidth:420, margin:"0 auto", width:"100%" }}>
@@ -1611,7 +1611,7 @@ function O2ReserveView({ onBack, themeMode, toggleTheme, emails }){
 
   if(screen==="fournisseur"){
     return(
-      <div style={{ minHeight:"100vh", background:CK_C.bg, fontFamily:"'DM Sans',sans-serif", color:CK_C.text, display:"flex", flexDirection:"column" }}>
+      <div style={{ minHeight:"100dvh", background:CK_C.bg, fontFamily:"'DM Sans',sans-serif", color:CK_C.text, display:"flex", flexDirection:"column" }}>
         <style>{CK_GS}</style>
         {headerBar("🚚 Livraison fournisseur")}
         <div style={{ flex:1, padding:"18px", maxWidth:420, margin:"0 auto", width:"100%" }}>
@@ -1635,7 +1635,7 @@ function O2ReserveView({ onBack, themeMode, toggleTheme, emails }){
 
   if(screen==="vehicle"&&selectedVehicle){
     return(
-      <div style={{ minHeight:"100vh", background:CK_C.bg, fontFamily:"'DM Sans',sans-serif", color:CK_C.text, display:"flex", flexDirection:"column" }}>
+      <div style={{ minHeight:"100dvh", background:CK_C.bg, fontFamily:"'DM Sans',sans-serif", color:CK_C.text, display:"flex", flexDirection:"column" }}>
         <style>{CK_GS}</style>
         {headerBar(selectedVehicle==="Préventif"?"🧰 Préventif":`🚑 ${selectedVehicle}`)}
         <div style={{ flex:1, padding:"18px", maxWidth:420, margin:"0 auto", width:"100%" }}>
@@ -1668,7 +1668,7 @@ function O2ReserveView({ onBack, themeMode, toggleTheme, emails }){
   }
 
   return(
-    <div style={{ minHeight:"100vh", background:CK_C.bg, fontFamily:"'DM Sans',sans-serif", color:CK_C.text, display:"flex", flexDirection:"column" }}>
+    <div style={{ minHeight:"100dvh", background:CK_C.bg, fontFamily:"'DM Sans',sans-serif", color:CK_C.text, display:"flex", flexDirection:"column" }}>
       <style>{CK_GS}</style>
       {headerBar("O₂ Réserve")}
       <div style={{ display:"flex", gap:8, padding:"16px 18px 0" }}>
