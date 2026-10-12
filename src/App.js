@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useContext, createContext, Fragment } from "react";
 import { dbChecklists } from "./firebase";
-import { doc, onSnapshot, setDoc, getDoc, getDocs, deleteDoc, collection, writeBatch, query, where } from "firebase/firestore";
+import { doc, onSnapshot, setDoc, getDoc, getDocs, deleteDoc, collection, writeBatch, query, where, waitForPendingWrites } from "firebase/firestore";
 import emailjs from "@emailjs/browser";
 import { getApp } from "firebase/app";
 import { getAuth, signInWithEmailAndPassword, signOut } from "firebase/auth";
@@ -1692,7 +1692,7 @@ function O2ReserveView({ onBack, themeMode, toggleTheme, emails }){
       </div>
       <div style={{ flex:1, padding:"18px", maxWidth:480, margin:"0 auto", width:"100%" }}>
         <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10 }}>
-          {O2_VEHICLES.map(v=>(
+          {O2_VEHICLES.filter(v=>v!=="Préventif").map(v=>(
             <button key={v} onClick={()=>setSelectedVehicle(v)} style={{ background:CK_C.panel, border:`1px solid ${CK_C.border}`, borderRadius:12, padding:"18px 10px", color:CK_C.text, fontWeight:700, fontSize:14, cursor:"pointer" }}>
               {v==="Préventif"?"🧰 Préventif":`🚑 ${v}`}
               <div style={{ fontSize:10, fontWeight:600, color:CK_C.muted, marginTop:4 }}>{o2ContentText(reserve.vehicules[v])}</div>
@@ -2789,10 +2789,36 @@ function useOnline(){
   },[]);
   return online;
 }
-function OfflineBanner(){
+// État d'envoi : "offline" | "sending" | "sent" | "idle".
+// Les saisies faites hors réseau sont en attente ; waitForPendingWrites se termine
+// quand le serveur a tout reçu.
+function useSyncStatus(){
+  const online=useOnline();
+  const [status,setStatus]=useState(online?"idle":"offline");
+  useEffect(()=>{
+    if(!online){ setStatus("offline"); return; }
+    let cancelled=false, shown=false, hideTimer=null;
+    const slow=setTimeout(()=>{ if(!cancelled){ shown=true; setStatus("sending"); } },800);
+    waitForPendingWrites(dbChecklists).then(()=>{
+      clearTimeout(slow);
+      if(cancelled) return;
+      if(shown){ setStatus("sent"); hideTimer=setTimeout(()=>{ if(!cancelled) setStatus("idle"); },6000); }
+      else setStatus("idle");
+    }).catch(()=>{ clearTimeout(slow); if(!cancelled) setStatus("idle"); });
+    return ()=>{ cancelled=true; clearTimeout(slow); if(hideTimer) clearTimeout(hideTimer); };
+  },[online]);
+  return status;
+}
+function SyncBanner({ status }){
+  if(status==="idle") return null;
+  const cfg={
+    offline:{ bg:CK_C.warning, color:"#1a1200", text:"📡 Hors connexion — tes saisies sont gardées sur le téléphone." },
+    sending:{ bg:"#2563eb", color:"#fff", text:"⏳ Envoi en cours… ne ferme pas l'application." },
+    sent:{ bg:CK_C.success, color:"#04210f", text:"✅ Tout est envoyé" },
+  }[status];
   return(
-    <div style={{ background:CK_C.warning, color:"#1a1200", fontSize:12, fontWeight:800, textAlign:"center", padding:"8px 12px", fontFamily:"'DM Sans',sans-serif" }}>
-      📡 Hors connexion — tes saisies sont gardées sur l'appareil et seront envoyées au retour du réseau (rouvre l'app une fois connecté).
+    <div style={{ background:cfg.bg, color:cfg.color, fontSize:12, fontWeight:800, textAlign:"center", padding:"8px 12px", fontFamily:"'DM Sans',sans-serif" }}>
+      {cfg.text}
     </div>
   );
 }
@@ -3623,7 +3649,7 @@ export default function App(){
   const goHome=()=>setView("home");
   const goBureau=()=>setView("bureau");
   const [askCode,setAskCode]=useState(false);
-  const online=useOnline();
+  const syncStatus=useSyncStatus();
   useEffect(()=>{ registerOfflineSupport(); },[]);
   const inBureauArea=view==="bureau"||view==="parametres"||view==="historique";
   const requestBureau=()=>{
@@ -3654,7 +3680,7 @@ export default function App(){
   return(
     <StockProvider>
       <BureauContext.Provider value={inBureauArea?null:{ open:requestBureau, badge:oosActive }}>
-        {!online&&<OfflineBanner/>}
+        <SyncBanner status={syncStatus}/>
         {content}
         {askCode&&<BureauCodePrompt onOk={codeOk} onCancel={()=>setAskCode(false)}/>}
       </BureauContext.Provider>
