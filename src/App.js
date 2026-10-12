@@ -140,6 +140,21 @@ function useChecklistsMonthStatus(checklistsData){
   }, [monthKey, JSON.stringify(vehicleNames)]);
   return statuses;
 }
+// Envoi d'UN seul mail à toute une liste d'adresses (séparées par des virgules).
+// Si l'envoi groupé échoue, on retombe sur un envoi adresse par adresse.
+async function sendMailToList(emails, title, content){
+  const list=[...new Set((emails||[]).map(e=>String(e).trim()).filter(Boolean))];
+  if(list.length===0) return;
+  try{
+    await emailjs.send("service_mrs8v2l","template_2sxsq4j",{ to_email:list.join(","), title, content },"Fhdx1kTE7vFmh4z07");
+  }catch(e){
+    console.error("Envoi groupé impossible, envoi adresse par adresse :", e);
+    for(const to of list){
+      try{ await emailjs.send("service_mrs8v2l","template_2sxsq4j",{ to_email:to, title, content },"Fhdx1kTE7vFmh4z07"); }
+      catch(e2){ console.error("Erreur envoi email à "+to+" :", e2); }
+    }
+  }
+}
 // Boutons d'en-tête communs
 function TopButton({ onClick, children, title }){
   return <button onClick={onClick} title={title} style={{background:CK_C.panel2,border:`1px solid ${CK_C.border}`,borderRadius:8,color:CK_C.muted,padding:"6px 11px",fontSize:12,fontWeight:700,cursor:"pointer"}}>{children}</button>;
@@ -275,11 +290,7 @@ function allVehicleNames(checklists){
 
 // Seuil effectif : valeur propre au produit si définie, sinon pourcentage par
 // défaut de la quantité requise (réglable dans Paramètres → Seuils).
-function effectiveMin(d, q, pct){
-  if(d && d.min!=null && d.min!=="") return Number(d.min)||0;
-  if(!pct) return 0;
-  return Math.ceil(q*pct/100);
-}
+function effectiveMin(){ return 0; } // plus de seuil de stock bas pour les produits (seule l'O₂ alerte)
 function isLow(stockMap, entry, pct){
   const d=stockMap[entry.key];
   const m=effectiveMin(d,entry.q,pct);
@@ -298,7 +309,7 @@ async function logMovement(m){
 // Entrée / sortie d'un produit. Sortie : on retire d'abord le lot qui périme
 // le plus tôt (FEFO), ou le lot précis demandé (lotId). Le stock ne descend
 // jamais sous 0 ; si on demande plus que le stock affiché, l'écart est noté.
-async function applyStockMovement({ vehicle, itemName, type, qty, date, by, lotId, minValue, emails, sealed }){
+async function applyStockMovement({ vehicle, itemName, type, qty, date, by, lotId, sealed }){
   const ref=doc(dbChecklists,STOCK_COL,peremptionKey(vehicle,itemName));
   const snap=await getDoc(ref);
   const cur=snap.exists()?snap.data():{ vehicle, itemName, lots:[] };
@@ -333,17 +344,6 @@ async function applyStockMovement({ vehicle, itemName, type, qty, date, by, lotI
   const after=lotsTotal(lots);
   await setDoc(ref, sanitizeUndefined({ ...cur, vehicle, itemName, lots, ...(sealed?{ sealed:true }:{}) }));
   await logMovement({ type, vehicle, itemName, qty, lotDate:date||"", by, stockBefore:before, stockAfter:after, shortfall });
-  // Alerte stock bas : uniquement au moment où le seuil est franchi (pas de doublon).
-  if(type==="sortie" && minValue>0 && before>=minValue && after<minValue && emails && emails.length>0){
-    try{
-      for(const to of emails){
-        await emailjs.send("service_mrs8v2l","template_2sxsq4j",{
-          to_email:to, title:`Alerte stock bas — ${vehicle}`,
-          content:`⚠ Stock bas\n\nVéhicule : ${vehicle}\nProduit : ${itemName}\nStock restant : ${after} (seuil minimum : ${minValue})\nDernière sortie par : ${by}`,
-        },"Fhdx1kTE7vFmh4z07");
-      }
-    }catch(e){ console.error("Erreur alerte stock bas:", e); }
-  }
   return { before, after, shortfall };
 }
 
@@ -359,12 +359,6 @@ async function applyStockCorrection({ vehicle, itemName, lots, by, sealed }){
   await logMovement({ type:"correction", vehicle, itemName, qty:after-before, by, stockBefore:before, stockAfter:after });
 }
 
-async function setStockMin(vehicle, itemName, value){
-  const ref=doc(dbChecklists,STOCK_COL,peremptionKey(vehicle,itemName));
-  const snap=await getDoc(ref);
-  const cur=snap.exists()?snap.data():{ vehicle, itemName, lots:[] };
-  await setDoc(ref, sanitizeUndefined({ ...cur, vehicle, itemName, min: value===""||value==null?null:Number(value) }));
-}
 
 // Initialisation du stock d'un véhicule : chaque produit sans stock démarre à
 // sa quantité standard (celle de la checklist). Les lots déjà présents (ex :
@@ -852,13 +846,7 @@ function ChecklistView({ vehicleName, onBack, checklists, emails, stockInit, sea
     missingLines = `Rempli par : ${[amb1,amb2].filter(Boolean).join(" / ")||"—"}\n\n` + missingLines;
     if(remarks.trim()) missingLines += `\n\nRemarques : ${remarks.trim()}`;
     try{
-      for(const to of emails){
-        await emailjs.send("service_mrs8v2l","template_2sxsq4j",{
-          to_email: to,
-          title: `Checklist ${vehicleName} — Matériel manquant`,
-          content: missingLines,
-        }, "Fhdx1kTE7vFmh4z07");
-      }
+      await sendMailToList(emails, `Checklist ${vehicleName} — Matériel manquant`, missingLines);
     }catch(e){ console.error("Erreur envoi email checklist:", e); }
     setSending(false);
   };
@@ -1361,13 +1349,7 @@ async function checkAndSendO2LowStock(currentPleines, nextPleines, emails){
   if(lowSizes.length===0) return;
   const stockText = lowSizes.map(s=>`${s} : ${nextPleines[s]} restante(s)`).join("\n");
   try{
-    for(const to of emails){
-      await emailjs.send("service_mrs8v2l","template_2sxsq4j",{
-        to_email: to,
-        title: "Alerte Stock O²",
-        content: `⚠ Stock bas\n\n${stockText}`,
-      }, "Fhdx1kTE7vFmh4z07");
-    }
+    await sendMailToList(emails, "Alerte Stock O²", `⚠ Stock bas\n\n${stockText}`);
   }catch(e){ console.error("Erreur alerte stock O2:", e); }
 }
 // Purge les entrées O2 de plus de 24 mois (même règle que l'historique checklists).
@@ -1761,11 +1743,7 @@ async function checkAndSendPeremptionAlerts(checklistsData, peremptionEmails){
     }).join("\n\n");
     const content=`Produits périmés à remplacer (${found.length} lot${found.length>1?"s":""}) :\n\n${lines}`;
 
-    for(const to of peremptionEmails){
-      try{
-        await emailjs.send("service_mrs8v2l","template_2sxsq4j",{ to_email:to, title:"Alerte Péremption — produits périmés à remplacer", content },"Fhdx1kTE7vFmh4z07");
-      }catch(e){ console.error("Erreur envoi email péremption:", e); }
-    }
+    await sendMailToList(peremptionEmails, "Alerte Péremption — produits périmés à remplacer", content);
   }catch(e){ console.error("Erreur vérification alertes péremption:", e); }
 }
 
@@ -1789,13 +1767,10 @@ function ProductSheet({ vehicle, entry, stockDoc, pct, initialised, stockEmails,
   const [date,setDate]=useState("");
   const [name,setName]=useState("");
   const [saving,setSaving]=useState(false);
-  const [minInput,setMinInput]=useState(stockDoc&&stockDoc.min!=null?String(stockDoc.min):"");
   const [corrLots,setCorrLots]=useState(()=>sortLots(stockDoc&&stockDoc.lots).map(l=>({...l})));
 
   const lots=sortLots(stockDoc&&stockDoc.lots);
   const total=lotsTotal(lots);
-  const minEff=effectiveMin(stockDoc,entry.q,pct);
-  const low=initialised && minEff>0 && total<minEff;
   const nameOk=name.trim().length>0;
   const dateOk=mode==="entree"?(!entry.p||date.length>0):mode==="correction"?(!entry.p||corrLots.every(l=>(l.quantite||0)<=0||!!l.date)):true;
   const qtyOk=mode==="correction"?true:qty>0;
@@ -1809,14 +1784,13 @@ function ProductSheet({ vehicle, entry, stockDoc, pct, initialised, stockEmails,
         await applyStockCorrection({ vehicle, itemName:entry.name, lots:corrLots, by:name.trim(), sealed });
         onSaved(`✅ Stock corrigé : ${entry.name}`);
       }else{
-        const r=await applyStockMovement({ vehicle, itemName:entry.name, type:mode, qty, date:mode==="entree"?date:"", by:name.trim(), minValue:initialised?minEff:0, emails:stockEmails, sealed });
+        const r=await applyStockMovement({ vehicle, itemName:entry.name, type:mode, qty, date:mode==="entree"?date:"", by:name.trim(), sealed });
         onSaved(`✅ ${mode==="entree"?"Entrée":"Sortie"} enregistrée : ${qty} × ${entry.name} (stock ${r.after})`);
       }
       rememberName(name);
       onClose();
     }catch(e){ console.error("Erreur mouvement stock:", e); setSaving(false); }
   };
-  const saveMin=async()=>{ try{ await setStockMin(vehicle, entry.name, minInput); }catch(e){ console.error(e); } };
 
   const tabBtn=(id,label,color)=>(
     <button onClick={()=>setMode(id)} style={{ flex:1, padding:"13px 6px", borderRadius:10, border:`2px solid ${mode===id?color:CK_C.border}`, background:mode===id?color:"transparent", color:mode===id?"white":CK_C.muted, fontWeight:800, fontSize:14 }}>{label}</button>
@@ -1833,10 +1807,10 @@ function ProductSheet({ vehicle, entry, stockDoc, pct, initialised, stockEmails,
           <button onClick={onClose} style={{ background:"transparent", border:"none", color:CK_C.muted, fontSize:26, lineHeight:1 }}>×</button>
         </div>
 
-        <div style={{ background:low?CK_C.dangerSoft:CK_C.bg, border:`1px solid ${low?CK_C.danger:CK_C.border}`, borderRadius:12, padding:"12px 14px", marginBottom:14 }}>
+        <div style={{ background:CK_C.bg, border:`1px solid ${CK_C.border}`, borderRadius:12, padding:"12px 14px", marginBottom:14 }}>
           <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
             <div style={{ fontSize:12, color:CK_C.muted, fontWeight:700, textTransform:"uppercase" }}>Stock actuel</div>
-            <div style={{ fontSize:26, fontWeight:900, color:low?CK_C.danger:CK_C.text }}>{total}{low&&<span style={{ fontSize:12, marginLeft:8 }}>⚠ sous le seuil ({minEff})</span>}</div>
+            <div style={{ fontSize:26, fontWeight:900, color:CK_C.text }}>{total}</div>
           </div>
           {lots.length>0&&entry.p&&(
             <div style={{ marginTop:8, paddingTop:8, borderTop:`1px dashed ${CK_C.border}` }}>
@@ -1894,12 +1868,6 @@ function ProductSheet({ vehicle, entry, stockDoc, pct, initialised, stockEmails,
           {saving?"Enregistrement…":!nameOk?"Indique ton nom":!dateOk?"Date de péremption requise":"✅ Enregistrer"}
         </button>
 
-        {!sealed&&(
-        <div style={{ marginTop:16, paddingTop:12, borderTop:`1px solid ${CK_C.border}`, display:"flex", alignItems:"center", justifyContent:"space-between", gap:10 }}>
-          <div style={{ fontSize:12, color:CK_C.muted }}>Seuil minimum<div style={{ fontSize:10 }}>vide = seuil par défaut ({pct||0}% → {Math.ceil(entry.q*(pct||0)/100)})</div></div>
-          <input type="number" min="0" value={minInput} onChange={e=>setMinInput(e.target.value)} onBlur={saveMin} placeholder="défaut" style={{ width:90, background:CK_C.bg, border:`1px solid ${CK_C.border}`, borderRadius:8, padding:"9px", color:CK_C.text, fontSize:14, textAlign:"center" }}/>
-        </div>
-        )}
       </div>
     </div>
   );
@@ -2080,13 +2048,7 @@ function RemarqueModal({ emails, onClose }){
     setSending(true);
     try{
       if(emails&&emails.length>0){
-        for(const to of emails){
-          await emailjs.send("service_mrs8v2l","template_2sxsq4j",{
-            to_email: to,
-            title: "Checklist Remarque",
-            content: `${text.trim()}\n\n${author.trim()}`,
-          }, "Fhdx1kTE7vFmh4z07");
-        }
+        await sendMailToList(emails, "Checklist Remarque", `${text.trim()}\n\n${author.trim()}`);
       }
     }catch(e){ console.error("Erreur envoi email remarque:", e); }
     setSending(false);
@@ -2757,9 +2719,87 @@ function BureauView({ onBack, onSettings, onHistory, checklists, sealedTemplates
         {big("📤","Envoyer une checklist","Déclencher la checklist d'un sac ouvert",()=>setSection("send"),0)}
         {big("🔍","Contenu des sacs","Produits et dates de chaque sac scellé",()=>setSection("contenu"),0)}
         {big("🚧","Véhicules hors service","Pas de checklist tant qu'ils sont à l'arrêt",()=>setSection("oos"),oosCount)}
+        <BackupButton/>
       </div>
     </Page>
   );
+}
+
+// ═══ SAUVEGARDE, MODE HORS CONNEXION ═══
+const BACKUP_COLLECTIONS=["stockapp_settings","stockapp_checklists","stockapp_stock","stockapp_mouvements","stockapp_o2","stockapp_o2_historique","stockapp_historique","stockapp_sealed_tasks"];
+
+// Lit toutes les collections de l'app et télécharge un fichier JSON daté.
+async function downloadBackup(){
+  const data={};
+  let docs=0;
+  for(const name of BACKUP_COLLECTIONS){
+    const snap=await getDocs(collection(dbChecklists,name));
+    data[name]={};
+    for(const d of snap.docs){ data[name][d.id]=d.data(); docs++; }
+  }
+  const now=new Date();
+  const stamp=`${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,"0")}-${String(now.getDate()).padStart(2,"0")}`;
+  const payload={ app:"aps-checklist-v2", exportedAt:now.toISOString(), collections:data };
+  const blob=new Blob([JSON.stringify(payload,null,1)],{ type:"application/json" });
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement("a");
+  a.href=url; a.download=`aps-sauvegarde-${stamp}.json`;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(()=>URL.revokeObjectURL(url),30000);
+  return docs;
+}
+
+function BackupButton(){
+  const [state,setState]=useState("idle"); // idle | busy | ok | err
+  const [info,setInfo]=useState("");
+  const run=async()=>{
+    setState("busy"); setInfo("");
+    try{
+      const n=await downloadBackup();
+      setState("ok"); setInfo(`${n} éléments sauvegardés`);
+    }catch(e){
+      console.error("Erreur sauvegarde:", e);
+      setState("err"); setInfo("La sauvegarde a échoué (réseau ?). Réessaie.");
+    }
+  };
+  return(
+    <div style={{ marginBottom:12 }}>
+      <button onClick={run} disabled={state==="busy"} style={{ width:"100%", background:CK_C.panel, border:`1px solid ${CK_C.border}`, borderRadius:16, padding:"22px 20px", color:CK_C.text, display:"flex", alignItems:"center", gap:16, textAlign:"left" }}>
+        <div style={{ fontSize:34 }}>💾</div>
+        <div style={{ flex:1 }}>
+          <div style={{ fontWeight:800, fontSize:17 }}>{state==="busy"?"Sauvegarde en cours…":"Sauvegarde complète"}</div>
+          <div style={{ fontSize:12, color:CK_C.muted, marginTop:2 }}>Télécharge toutes les données (fichier .json)</div>
+        </div>
+        <span style={{ color:CK_C.muted, fontSize:20 }}>⬇</span>
+      </button>
+      {info&&<div style={{ fontSize:12, fontWeight:700, marginTop:6, color:state==="err"?CK_C.danger:CK_C.success }}>{state==="ok"?"✅ ":"⚠ "}{info}</div>}
+    </div>
+  );
+}
+
+// Bandeau « hors connexion » (n'apparaît que sans réseau).
+function useOnline(){
+  const [online,setOnline]=useState(typeof navigator==="undefined"||navigator.onLine!==false);
+  useEffect(()=>{
+    const on=()=>setOnline(true), off=()=>setOnline(false);
+    window.addEventListener("online",on); window.addEventListener("offline",off);
+    return ()=>{ window.removeEventListener("online",on); window.removeEventListener("offline",off); };
+  },[]);
+  return online;
+}
+function OfflineBanner(){
+  return(
+    <div style={{ background:CK_C.warning, color:"#1a1200", fontSize:12, fontWeight:800, textAlign:"center", padding:"8px 12px", fontFamily:"'DM Sans',sans-serif" }}>
+      📡 Hors connexion — tes saisies sont gardées sur l'appareil et seront envoyées au retour du réseau (rouvre l'app une fois connecté).
+    </div>
+  );
+}
+
+// Permet à l'app de s'ouvrir sans internet (fichier public/service-worker.js).
+function registerOfflineSupport(){
+  if(typeof navigator==="undefined"||!("serviceWorker" in navigator)) return;
+  const reg=()=>navigator.serviceWorker.register("/service-worker.js").catch(()=>{});
+  if(document.readyState==="complete") reg(); else window.addEventListener("load",reg);
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -3243,7 +3283,7 @@ function VehiclesEditor({ vehicleLists, setVehicleLists, ambulanceNames }){
 }
 
 // ═══════════════════════════════════════════════════════════════
-// PARAMÈTRES — Emails, Checklists (produits), Scellés, Véhicules, Seuils
+// PARAMÈTRES — Emails, Checklists (produits), Scellés, Véhicules
 // ═══════════════════════════════════════════════════════════════
 function SectionTitle({ icon, title }){
   return <div style={{ fontSize:15, fontWeight:800, marginBottom:12 }}>{icon} {title}</div>;
@@ -3306,7 +3346,7 @@ function ParametresView({ checklistsData, setChecklistsData, tpmrVslTemplate, se
   const removeItem=(sIdx,shIdx,itIdx)=>setEditingChecklist(p=>({...p,sections:p.sections.map((s,i)=>i===sIdx?{...s,shelves:s.shelves.map((sh,j)=>j===shIdx?{...sh,items:sh.items.filter((_,k)=>k!==itIdx)}:sh)}:s)}));
   const updateItem=(sIdx,shIdx,itIdx,field,val)=>setEditingChecklist(p=>({...p,sections:p.sections.map((s,i)=>i===sIdx?{...s,shelves:s.shelves.map((sh,j)=>j===shIdx?{...sh,items:sh.items.map((it,k)=>k===itIdx?{...it,[field]:val}:it)}:sh)}:s)}));
 
-  const TABS=[{id:"emails",icon:"✉️",label:"Emails"},{id:"checklists",icon:"📋",label:"Checklists"},{id:"scelles",icon:"🔒",label:"Scellés"},{id:"vehicules",icon:"🚐",label:"Véhicules"},{id:"seuils",icon:"📉",label:"Seuils"}];
+  const TABS=[{id:"emails",icon:"✉️",label:"Emails"},{id:"checklists",icon:"📋",label:"Checklists"},{id:"scelles",icon:"🔒",label:"Scellés"},{id:"vehicules",icon:"🚐",label:"Véhicules"}];
   return(
     <Page>
       <TopBar title="⚙️ Paramètres" subtitle="Configuration" onBack={()=>{ if(editingChecklist){ setEditingChecklist(null); }else{ onBack(); } }} themeMode={themeMode} toggleTheme={toggleTheme}/>
@@ -3321,7 +3361,6 @@ function ParametresView({ checklistsData, setChecklistsData, tpmrVslTemplate, se
             <EmailList icon="📋" title="Emails — Checklists et remarques" hint="Reçoivent les checklists envoyées (matériel manquant) et les remarques." list={checklistEmails} setList={setChecklistEmails}/>
             <EmailList icon="🅾️" title="Emails — Alerte stock oxygène" hint="Reçoivent un email dès qu'une taille de bouteille (B2/B5/B10) tombe à 2, 1 ou 0 pleines en réserve." list={o2Emails} setList={setO2Emails}/>
             <EmailList icon="🗓️" title="Emails — Alerte Péremption" hint="Reçoivent 1 seul email, le 1er du mois de péremption, qui liste les produits périmés à remplacer, classés par véhicule." list={peremptionEmails} setList={setPeremptionEmails}/>
-            <EmailList icon="📉" title="Emails — Alerte stock bas" hint="Reçoivent un email quand un produit passe sous son seuil minimum dans un véhicule (une seule fois au franchissement du seuil)." list={stockEmails} setList={setStockEmails}/>
           </div>
         )}
                   {tab==="checklists"&&(
@@ -3454,17 +3493,6 @@ function ParametresView({ checklistsData, setChecklistsData, tpmrVslTemplate, se
           )}
         {tab==="vehicules"&&<VehiclesEditor vehicleLists={vehicleLists} setVehicleLists={setVehicleLists} ambulanceNames={Object.keys(checklistsData)}/>}
         {tab==="scelles"&&<SealedTemplatesEditor templates={sealedTemplates} setTemplates={setSealedTemplates} ambulanceNames={Object.keys(checklistsData)}/>}
-        {tab==="seuils"&&(
-          <div>
-            <SectionTitle icon="📉" title="Seuil minimum par défaut"/>
-            <div style={{ fontSize:12, color:CK_C.muted, marginBottom:14 }}>Un produit est « sous le seuil » quand son stock est inférieur à ce pourcentage de sa quantité requise (arrondi à l'unité supérieure). Tu peux fixer un seuil précis pour un produit depuis sa fiche (Réappro véhicules). 0 = pas d'alerte par défaut.</div>
-            <div style={{ display:"flex", alignItems:"center", gap:10 }}>
-              <input type="number" min="0" max="100" value={stockPct} onChange={e=>setStockPct(Math.max(0,Math.min(100,parseInt(e.target.value)||0)))} style={{ width:90, background:CK_C.bg, color:CK_C.text, fontSize:18, fontWeight:800, border:`1px solid ${CK_C.border}`, borderRadius:9, padding:"10px", textAlign:"center" }}/>
-              <span style={{ fontSize:14, fontWeight:700 }}>% de la quantité requise</span>
-            </div>
-            <div style={{ fontSize:11, color:CK_C.muted, marginTop:12 }}>Exemples avec {stockPct}% : requis 10 → seuil {Math.ceil(10*stockPct/100)} · requis 4 → seuil {Math.ceil(4*stockPct/100)} · requis 1 → seuil {Math.ceil(1*stockPct/100)}</div>
-          </div>
-        )}
       </div>
     </Page>
   );
@@ -3517,7 +3545,7 @@ function HomeView({ onGo, checklistsData, tpmrVslTemplate, stockInit, stockPct, 
 }
 
 // ── Verrou du Bureau (Bureau + Paramètres + Historique) ──
-const BUREAU_CODE="2327";
+const BUREAU_CODE="232798";
 const BUREAU_LOCK_MS=5*60*1000; // se reverrouille 5 min après le dernier clic
 let bureauUnlockedUntil=0;
 function BureauCodePrompt({ onOk, onCancel }){
@@ -3558,9 +3586,8 @@ export default function App(){
   const [checklistEmails,setChecklistEmails]=useSettings("checklistEmails",[]);
   const [o2Emails,setO2Emails]=useSettings("o2Emails",[]);
   const [peremptionEmails,setPeremptionEmails]=useSettings("peremptionEmails",[]);
-  const [stockEmails,setStockEmails]=useSettings("stockEmails",[]);
   const [stockInit,setStockInit]=useSettings("stockInit",{});
-  const [stockPct,setStockPct]=useSettings("stockPct",30);
+  const stockPct=0; // plus de seuil de stock bas
   const [sealedTemplates,setSealedTemplates]=useSettings("sealedTemplates",[]);
   const [vehicleLists,setVehicleLists]=useSettings("vehicleLists",DEFAULT_VEHICLE_LISTS);
   if(vehicleLists&&Array.isArray(vehicleLists.tpmr)) TPMR_VSL_VEHICLES.splice(0,TPMR_VSL_VEHICLES.length,...sortFleet(vehicleLists.tpmr));
@@ -3582,6 +3609,8 @@ export default function App(){
   const goHome=()=>setView("home");
   const goBureau=()=>setView("bureau");
   const [askCode,setAskCode]=useState(false);
+  const online=useOnline();
+  useEffect(()=>{ registerOfflineSupport(); },[]);
   const inBureauArea=view==="bureau"||view==="parametres"||view==="historique";
   const requestBureau=()=>{
     if(Date.now()<bureauUnlockedUntil){ bureauUnlockedUntil=Date.now()+BUREAU_LOCK_MS; setView("bureau"); }
@@ -3603,14 +3632,15 @@ export default function App(){
   let content;
   if(view==="checklist") content=<ChecklistHome onBack={goHome} checklists={checklistsData} emails={checklistEmails} tpmrVslTemplate={tpmrVslTemplate} sealedTemplates={sealedTemplates} stockInit={stockInit} outOfService={outOfService} setOutOfService={setOutOfService} {...common}/>;
   else if(view==="bureau") content=<BureauView onBack={goHome} onSettings={openSettings} onHistory={openHistory} checklists={checklistsData} sealedTemplates={sealedTemplates} outOfService={outOfService} setOutOfService={setOutOfService} {...common}/>;
-  else if(view==="reappro") content=<ReapproHome sealedTemplates={sealedTemplates} checklists={checklistsData} tpmrVslTemplate={tpmrVslTemplate} stockInit={stockInit} setStockInit={setStockInit} pct={stockPct} stockEmails={stockEmails} remarqueEmails={checklistEmails} o2Emails={o2Emails} onBack={goHome} onSettings={openSettings} onHistory={openHistory} {...common}/>;
+  else if(view==="reappro") content=<ReapproHome sealedTemplates={sealedTemplates} checklists={checklistsData} tpmrVslTemplate={tpmrVslTemplate} stockInit={stockInit} setStockInit={setStockInit} pct={stockPct} remarqueEmails={checklistEmails} o2Emails={o2Emails} onBack={goHome} onSettings={openSettings} onHistory={openHistory} {...common}/>;
   else if(view==="historique") content=<HistoriqueHome onBack={goBureau} o2Emails={o2Emails} checklists={checklistsData} tpmrVslTemplate={tpmrVslTemplate} peremptionEmails={peremptionEmails} {...common}/>;
-  else if(view==="parametres") content=<ParametresView checklistsData={checklistsData} setChecklistsData={setChecklistsData} tpmrVslTemplate={tpmrVslTemplate} setTpmrVslTemplate={setTpmrVslTemplate} checklistEmails={checklistEmails} setChecklistEmails={setChecklistEmails} o2Emails={o2Emails} setO2Emails={setO2Emails} peremptionEmails={peremptionEmails} setPeremptionEmails={setPeremptionEmails} stockEmails={stockEmails} setStockEmails={setStockEmails} stockPct={stockPct} setStockPct={setStockPct} sealedTemplates={sealedTemplates} setSealedTemplates={setSealedTemplates} vehicleLists={vehicleLists} setVehicleLists={setVehicleLists} onBack={goBureau} {...common}/>;
+  else if(view==="parametres") content=<ParametresView checklistsData={checklistsData} setChecklistsData={setChecklistsData} tpmrVslTemplate={tpmrVslTemplate} setTpmrVslTemplate={setTpmrVslTemplate} checklistEmails={checklistEmails} setChecklistEmails={setChecklistEmails} o2Emails={o2Emails} setO2Emails={setO2Emails} peremptionEmails={peremptionEmails} setPeremptionEmails={setPeremptionEmails} stockPct={stockPct} sealedTemplates={sealedTemplates} setSealedTemplates={setSealedTemplates} vehicleLists={vehicleLists} setVehicleLists={setVehicleLists} onBack={goBureau} {...common}/>;
   else content=<HomeView onGo={setView} checklistsData={checklistsData} tpmrVslTemplate={tpmrVslTemplate} stockInit={stockInit} stockPct={stockPct} outOfService={outOfService} {...common}/>;
 
   return(
     <StockProvider>
       <BureauContext.Provider value={inBureauArea?null:{ open:requestBureau, badge:oosActive }}>
+        {!online&&<OfflineBanner/>}
         {content}
         {askCode&&<BureauCodePrompt onOk={codeOk} onCancel={()=>setAskCode(false)}/>}
       </BureauContext.Provider>
