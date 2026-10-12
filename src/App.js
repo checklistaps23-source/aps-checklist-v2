@@ -2,6 +2,8 @@ import { useState, useEffect, useRef, useContext, createContext, Fragment } from
 import { dbChecklists } from "./firebase";
 import { doc, onSnapshot, setDoc, getDoc, getDocs, deleteDoc, collection, writeBatch, query, where } from "firebase/firestore";
 import emailjs from "@emailjs/browser";
+import { getApp } from "firebase/app";
+import { getAuth, signInWithEmailAndPassword, signOut } from "firebase/auth";
 
 // ═══════════════════════════════════════════════════════════════
 // A.P.S. CHECKLIST — app séparée de DispatchAI
@@ -3545,26 +3547,38 @@ function HomeView({ onGo, checklistsData, tpmrVslTemplate, stockInit, stockPct, 
 }
 
 // ── Verrou du Bureau (Bureau + Paramètres + Historique) ──
-const BUREAU_CODE="232798";
+const BUREAU_EMAIL="bureau@aps-checklist.app";
 const BUREAU_LOCK_MS=5*60*1000; // se reverrouille 5 min après le dernier clic
+const authApp=getAuth(getApp());
 let bureauUnlockedUntil=0;
 function BureauCodePrompt({ onOk, onCancel }){
-  const [code,setCode]=useState("");
-  const [bad,setBad]=useState(false);
-  const submit=()=>{
-    if(code===BUREAU_CODE){ onOk(); }
-    else{ setBad(true); setCode(""); }
+  const [pw,setPw]=useState("");
+  const [msg,setMsg]=useState("");
+  const [busy,setBusy]=useState(false);
+  const submit=async()=>{
+    if(!pw||busy) return;
+    setBusy(true); setMsg("");
+    try{
+      await signInWithEmailAndPassword(authApp,BUREAU_EMAIL,pw);
+      onOk();
+    }catch(e){
+      const c=(e&&e.code)||"";
+      if(c.includes("network")) setMsg("Pas de réseau : la connexion au Bureau demande internet.");
+      else if(c.includes("too-many")) setMsg("Trop d'essais. Attends quelques minutes puis réessaie.");
+      else setMsg("Mot de passe incorrect");
+      setPw(""); setBusy(false);
+    }
   };
   return(
     <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,0.85)", display:"flex", alignItems:"center", justifyContent:"center", zIndex:900, padding:16 }}>
       <div style={{ background:CK_C.panel, border:`1px solid ${CK_C.border}`, borderRadius:16, padding:22, width:320, maxWidth:"100%" }}>
         <div style={{ fontWeight:800, fontSize:16, marginBottom:4 }}>🔒 Bureau</div>
-        <div style={{ fontSize:12, color:CK_C.muted, marginBottom:14 }}>Entre le code pour continuer.</div>
-        <input autoFocus type="password" inputMode="numeric" value={code} onChange={e=>{ const v=e.target.value.replace(/\D/g,"").slice(0,BUREAU_CODE.length); setBad(false); if(v.length===BUREAU_CODE.length){ if(v===BUREAU_CODE){ onOk(); } else { setBad(true); setCode(""); } } else setCode(v); }} onKeyDown={e=>{ if(e.key==="Enter") submit(); }} placeholder="Code" style={{ width:"100%", background:CK_C.bg, border:`1px solid ${bad?CK_C.danger:CK_C.border}`, borderRadius:10, padding:"12px", color:CK_C.text, fontSize:22, textAlign:"center", letterSpacing:"6px", boxSizing:"border-box" }}/>
-        {bad&&<div style={{ fontSize:12, color:CK_C.danger, fontWeight:700, marginTop:8, textAlign:"center" }}>Code incorrect</div>}
+        <div style={{ fontSize:12, color:CK_C.muted, marginBottom:14 }}>Entre le mot de passe pour continuer.</div>
+        <input autoFocus type="password" value={pw} onChange={e=>{ setMsg(""); setPw(e.target.value); }} onKeyDown={e=>{ if(e.key==="Enter") submit(); }} placeholder="Mot de passe" style={{ width:"100%", background:CK_C.bg, border:`1px solid ${msg?CK_C.danger:CK_C.border}`, borderRadius:10, padding:"12px", color:CK_C.text, fontSize:18, textAlign:"center", boxSizing:"border-box" }}/>
+        {msg&&<div style={{ fontSize:12, color:CK_C.danger, fontWeight:700, marginTop:8, textAlign:"center" }}>{msg}</div>}
         <div style={{ display:"flex", gap:8, marginTop:14 }}>
           <button onClick={onCancel} style={{ flex:1, background:CK_C.panel2, border:`1px solid ${CK_C.border}`, borderRadius:9, color:CK_C.muted, padding:"12px", fontWeight:700 }}>Annuler</button>
-          <button onClick={submit} disabled={code.length===0} style={{ flex:1, background:code.length?CK_C.success:CK_C.border, border:"none", borderRadius:9, color:"white", padding:"12px", fontWeight:800 }}>OK</button>
+          <button onClick={submit} disabled={pw.length===0||busy} style={{ flex:1, background:pw.length&&!busy?CK_C.success:CK_C.border, border:"none", borderRadius:9, color:"white", padding:"12px", fontWeight:800 }}>{busy?"…":"OK"}</button>
         </div>
       </div>
     </div>
@@ -3620,7 +3634,7 @@ export default function App(){
   useEffect(()=>{
     if(!inBureauArea) return;
     const touch=()=>{ bureauUnlockedUntil=Date.now()+BUREAU_LOCK_MS; };
-    const check=setInterval(()=>{ if(Date.now()>bureauUnlockedUntil) setView("home"); },10000);
+    const check=setInterval(()=>{ if(Date.now()>bureauUnlockedUntil){ if(authApp.currentUser) signOut(authApp).catch(()=>{}); setView("home"); } },10000);
     document.addEventListener("click",touch,true);
     return ()=>{ clearInterval(check); document.removeEventListener("click",touch,true); };
   },[inBureauArea]);
