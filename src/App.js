@@ -159,7 +159,7 @@ function TopBar({ title, subtitle, onBack, themeMode, toggleTheme, onSettings, o
     <div style={{ background:CK_C.panel, borderBottom:`1px solid ${CK_C.border}`, padding:"12px 16px", display:"flex", alignItems:"center", justifyContent:"space-between", flexWrap:"wrap", gap:10, position:"sticky", top:0, zIndex:20 }}>
       <div style={{ display:"flex", alignItems:"center", gap:10 }}>
         {onBack&&<button onClick={onBack} style={{ background:"transparent", border:`1px solid ${CK_C.border}`, borderRadius:8, color:CK_C.muted, padding:"6px 12px", fontSize:14, cursor:"pointer" }}>←</button>}
-        {logo?<img src={APS_LOGO} alt="A.P.S." style={{ height:34, background:"white", borderRadius:8, padding:"4px 8px", display:"block" }}/>:<div>
+        {logo?<img src={APS_LOGO} alt="A.P.S." style={{ height:38, display:"block", filter:themeMode==="light"?"none":"brightness(2.1) saturate(1.1)" }}/>:<div>
           <div style={{ fontWeight:800, fontSize:16 }}>{title}</div>
           {subtitle&&<div style={{ fontSize:10, color:CK_C.muted, textTransform:"uppercase", letterSpacing:"1px" }}>{subtitle}</div>}
         </div>}
