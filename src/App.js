@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useContext, createContext } from "react";
+import { useState, useEffect, useRef, useContext, createContext, Fragment } from "react";
 import { dbChecklists } from "./firebase";
 import { doc, onSnapshot, setDoc, getDoc, getDocs, deleteDoc, collection, writeBatch, query, where } from "firebase/firestore";
 import emailjs from "@emailjs/browser";
@@ -145,7 +145,15 @@ function TopButton({ onClick, children, title }){
   return <button onClick={onClick} title={title} style={{background:CK_C.panel2,border:`1px solid ${CK_C.border}`,borderRadius:8,color:CK_C.muted,padding:"6px 11px",fontSize:12,fontWeight:700,cursor:"pointer"}}>{children}</button>;
 }
 // Barre du haut : retour, titre, puis clair/sombre + Paramètres + Historique
-function TopBar({ title, subtitle, onBack, themeMode, toggleTheme, onBureau, bureauBadge, onSettings, onHistory }){
+// Le bouton Bureau est affiché dans la barre du haut de tous les écrans (sauf dans le Bureau lui-même).
+const BureauContext=createContext(null);
+function useBureau(){ return useContext(BureauContext); }
+function BureauButton(){
+  const b=useBureau();
+  if(!b) return null;
+  return <TopButton onClick={b.open} title="Bureau"><span style={{ display:"inline-flex", alignItems:"center", gap:6 }}>🏢 Bureau<Badge n={b.badge} color="#ef4444"/></span></TopButton>;
+}
+function TopBar({ title, subtitle, onBack, themeMode, toggleTheme, onSettings, onHistory }){
   return(
     <div style={{ background:CK_C.panel, borderBottom:`1px solid ${CK_C.border}`, padding:"12px 16px", display:"flex", alignItems:"center", justifyContent:"space-between", flexWrap:"wrap", gap:10, position:"sticky", top:0, zIndex:20 }}>
       <div style={{ display:"flex", alignItems:"center", gap:10 }}>
@@ -157,7 +165,7 @@ function TopBar({ title, subtitle, onBack, themeMode, toggleTheme, onBureau, bur
       </div>
       <div style={{ display:"flex", alignItems:"center", gap:6 }}>
         <TopButton onClick={toggleTheme} title="Clair / sombre">{themeMode==="light"?"🌙":"☀️"}</TopButton>
-        {onBureau&&<TopButton onClick={onBureau} title="Bureau"><span style={{ display:"inline-flex", alignItems:"center", gap:6 }}>🏢 Bureau<Badge n={bureauBadge} color="#ef4444"/></span></TopButton>}
+        <BureauButton/>
         {onSettings&&<TopButton onClick={onSettings} title="Paramètres">⚙️ Paramètres</TopButton>}
         {onHistory&&<TopButton onClick={onHistory} title="Historique">📅 Historique</TopButton>}
       </div>
@@ -1242,7 +1250,7 @@ function ChecklistHistoriqueSubView({ onBack, themeMode, toggleTheme }){
   );
 }
 
-function O2HistoriqueSubView({ onBack, themeMode, toggleTheme }){
+function O2HistoriqueList({ onBack, themeMode, toggleTheme, onCorriger, onFournisseur }){
   const [entries,setEntries]=useState([]);
   const [loaded,setLoaded]=useState(false);
   const [reserve,setReserve]=useState(O2_EMPTY_RESERVE);
@@ -1289,6 +1297,10 @@ function O2HistoriqueSubView({ onBack, themeMode, toggleTheme }){
             </div>
           );
         })}
+      </div>
+      <div style={{ display:"flex", gap:8, padding:"12px 14px 0" }}>
+        <button onClick={onCorriger} style={{ flex:1, background:CK_C.panel2, border:`1px solid ${CK_C.border}`, borderRadius:10, color:CK_C.text, padding:"11px", fontWeight:700, fontSize:13 }}>✏️ Corriger</button>
+        <button onClick={onFournisseur} style={{ flex:1, background:CK_C.panel2, border:`1px solid ${CK_C.border}`, borderRadius:10, color:CK_C.text, padding:"11px", fontWeight:700, fontSize:13 }}>🚚 Livraison fournisseur</button>
       </div>
       <div style={{ flex:1, padding:"14px", overflowY:"auto" }}>
         {!loaded&&<div style={{ textAlign:"center", color:CK_C.muted, padding:"40px" }}>Chargement…</div>}
@@ -1501,30 +1513,129 @@ function BottleStepper({label,value,onChange,max=2}){
   );
 }
 
+
 // ═══════════════════════════════════════
-// RÉSERVE OXYGÈNE — compteurs, échanges véhicules, livraison fournisseur
+// O₂ — écran des ambulanciers (compteurs + entrées / sorties par véhicule).
+// La correction manuelle et la livraison fournisseur sont réservées au Bureau :
+// elles sont dans Historique → Bouteilles O².
 // ═══════════════════════════════════════
+function O2Header({ title, onBack, themeMode, toggleTheme }){
+  return(
+    <div style={{ background:CK_C.panel, borderBottom:`1px solid ${CK_C.border}`, padding:"14px 16px", display:"flex", alignItems:"center", justifyContent:"space-between", flexWrap:"wrap", gap:10, position:"sticky", top:0, zIndex:10 }}>
+      <div style={{ display:"flex", alignItems:"center", gap:10 }}>
+        <button onClick={onBack} style={{ background:"transparent", border:`1px solid ${CK_C.border}`, borderRadius:8, color:CK_C.muted, padding:"6px 12px", fontSize:14, cursor:"pointer" }}>←</button>
+        <div style={{ fontWeight:800, fontSize:16 }}>{title}</div>
+      </div>
+      <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+        <TopButton onClick={toggleTheme} title="Clair / sombre">{themeMode==="light"?"🌙":"☀️"}</TopButton>
+        <BureauButton/>
+      </div>
+    </div>
+  );
+}
+
+// Correction manuelle (Bureau) : on encode ce qui est réellement là.
+function O2CorrectionScreen({ reserve, onBack, themeMode, toggleTheme }){
+  const [draft,setDraft]=useState(()=>JSON.parse(JSON.stringify(reserve)));
+  const [name,setName]=useState("");
+  const setP=(k,s,v)=>setDraft(p=>({ ...p, [k]:{ ...p[k], [s]:v } }));
+  const setV=(veh,s,v)=>setDraft(p=>({ ...p, vehicules:{ ...p.vehicules, [veh]:{ ...p.vehicules[veh], [s]:v } } }));
+  const canSave=name.trim().length>0;
+  const save=()=>{
+    if(!canSave) return;
+    applyO2Correction(draft,name.trim()).catch(e=>console.error(e));
+    rememberName(name);
+    onBack();
+  };
+  const box={ background:CK_C.panel, border:`1px solid ${CK_C.border}`, borderRadius:12, padding:"16px", marginBottom:14 };
+  return(
+    <div style={{ minHeight:"100dvh", background:CK_C.bg, fontFamily:"'DM Sans',sans-serif", color:CK_C.text, display:"flex", flexDirection:"column" }}>
+      <style>{CK_GS}</style>
+      <O2Header title="✏️ Corriger l'O₂" onBack={onBack} themeMode={themeMode} toggleTheme={toggleTheme}/>
+      <div style={{ flex:1, padding:"18px", maxWidth:420, margin:"0 auto", width:"100%" }}>
+        <div style={{ fontSize:12, color:CK_C.muted, marginBottom:14 }}>Encode ce qui est réellement là. Les chiffres remplacent les anciens.</div>
+        <div style={box}>
+          <div style={{ fontSize:11, fontWeight:700, color:"#3b82f6", textTransform:"uppercase", marginBottom:4 }}>Stock — bouteilles pleines</div>
+          {O2_SIZES.map(s=>(<BottleStepper key={s} label={s} value={draft.pleines[s]||0} onChange={v=>setP("pleines",s,v)} max={99}/>))}
+        </div>
+        <div style={box}>
+          <div style={{ fontSize:11, fontWeight:700, color:CK_C.muted, textTransform:"uppercase", marginBottom:4 }}>Stock — bouteilles vides</div>
+          {O2_SIZES.map(s=>(<BottleStepper key={s} label={s} value={draft.vides[s]||0} onChange={v=>setP("vides",s,v)} max={99}/>))}
+        </div>
+        {O2_VEHICLES.map(veh=>(
+          <div key={veh} style={box}>
+            <div style={{ fontSize:11, fontWeight:700, color:CK_C.success, textTransform:"uppercase", marginBottom:4 }}>{veh==="Préventif"?"🧰 Préventif":`🚑 ${veh}`} — bouteilles dedans</div>
+            {O2_SIZES.map(s=>(<BottleStepper key={s} label={s} value={draft.vehicules[veh][s]||0} onChange={v=>setV(veh,s,v)} max={9}/>))}
+          </div>
+        ))}
+        <input value={name} onChange={e=>setName(e.target.value)} placeholder="Ton nom (obligatoire)*" style={{ width:"100%", background:CK_C.bg, border:`1px solid ${name.trim()?CK_C.border:CK_C.danger}`, borderRadius:8, padding:"10px 12px", color:CK_C.text, fontSize:13, marginBottom:14, boxSizing:"border-box" }}/>
+        <button disabled={!canSave} onClick={save} style={{ width:"100%", background:canSave?CK_C.success:CK_C.border, border:"none", borderRadius:10, color:"white", padding:"14px", fontWeight:800, fontSize:15, marginBottom:30 }}>✅ Enregistrer la correction</button>
+      </div>
+    </div>
+  );
+}
+
+// Livraison fournisseur (Bureau) : vides reprises / pleines livrées.
+function O2SupplierScreen({ emails, onBack, themeMode, toggleTheme }){
+  const [fSortie,setFSortie]=useState({B2:0,B5:0,B10:0});
+  const [fEntree,setFEntree]=useState({B2:0,B5:0,B10:0});
+  const [fSaving,setFSaving]=useState(false);
+  const canSend=(Object.values(fSortie).some(v=>v>0)||Object.values(fEntree).some(v=>v>0))&&!fSaving;
+  const send=async()=>{
+    if(!canSend) return;
+    setFSaving(true);
+    const {current,next}=await applyO2Movement("fournisseur", fSortie, fEntree, {});
+    await checkAndSendO2LowStock(current,next,emails);
+    setFSaving(false);
+    onBack();
+  };
+  return(
+    <div style={{ minHeight:"100dvh", background:CK_C.bg, fontFamily:"'DM Sans',sans-serif", color:CK_C.text, display:"flex", flexDirection:"column" }}>
+      <style>{CK_GS}</style>
+      <O2Header title="🚚 Livraison fournisseur" onBack={onBack} themeMode={themeMode} toggleTheme={toggleTheme}/>
+      <div style={{ flex:1, padding:"18px", maxWidth:420, margin:"0 auto", width:"100%" }}>
+        <div style={{ background:CK_C.panel, border:`1px solid ${CK_C.border}`, borderRadius:12, padding:"16px", marginBottom:14 }}>
+          <div style={{ fontSize:11, fontWeight:700, color:CK_C.danger, textTransform:"uppercase", marginBottom:4 }}>Sortie</div>
+          <div style={{ fontSize:10, color:CK_C.muted, marginBottom:6 }}>Vides reprises par le fournisseur</div>
+          {O2_SIZES.map(s=>(<BottleStepper key={s} label={s} value={fSortie[s]} onChange={v=>setFSortie(p=>({...p,[s]:v}))} max={99}/>))}
+        </div>
+        <div style={{ background:CK_C.panel, border:`1px solid ${CK_C.border}`, borderRadius:12, padding:"16px", marginBottom:16 }}>
+          <div style={{ fontSize:11, fontWeight:700, color:CK_C.success, textTransform:"uppercase", marginBottom:4 }}>Entrée</div>
+          <div style={{ fontSize:10, color:CK_C.muted, marginBottom:6 }}>Pleines livrées par le fournisseur</div>
+          {O2_SIZES.map(s=>(<BottleStepper key={s} label={s} value={fEntree[s]} onChange={v=>setFEntree(p=>({...p,[s]:v}))} max={99}/>))}
+        </div>
+        <button disabled={!canSend} onClick={send} style={{ width:"100%", background:canSend?CK_C.success:CK_C.border, border:"none", borderRadius:10, color:"white", padding:"14px", fontWeight:800, fontSize:15, cursor:canSend?"pointer":"not-allowed", opacity:canSend?1:0.6 }}>
+          {fSaving?"Envoi…":"✅ Enregistrer"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// Historique O₂ (Bureau) : liste + boutons Corriger / Livraison fournisseur.
+function O2HistoriqueSubView({ onBack, themeMode, toggleTheme, emails }){
+  const [screen,setScreen]=useState("list"); // list | corriger | fournisseur
+  const [reserve,setReserve]=useState(normO2Reserve(null));
+  useEffect(()=>{
+    const unsub=onSnapshot(doc(dbChecklists,"stockapp_o2","reserve"), snap=>setReserve(normO2Reserve(snap.exists()?snap.data():null)));
+    return ()=>unsub();
+  },[]);
+  if(screen==="corriger") return <O2CorrectionScreen reserve={reserve} onBack={()=>setScreen("list")} themeMode={themeMode} toggleTheme={toggleTheme}/>;
+  if(screen==="fournisseur") return <O2SupplierScreen emails={emails} onBack={()=>setScreen("list")} themeMode={themeMode} toggleTheme={toggleTheme}/>;
+  return <O2HistoriqueList onBack={onBack} themeMode={themeMode} toggleTheme={toggleTheme} onCorriger={()=>setScreen("corriger")} onFournisseur={()=>setScreen("fournisseur")}/>;
+}
+
 function O2ReserveView({ onBack, themeMode, toggleTheme, emails }){
   const [reserve,setReserve]=useState(normO2Reserve(null));
-  const [screen,setScreen]=useState("home"); // home | vehicle | fournisseur | historique | corriger
   const [selectedVehicle,setSelectedVehicle]=useState(null);
   const [sortie,setSortie]=useState({B2:0,B5:0,B10:0});
   const [entree,setEntree]=useState({B2:0,B5:0,B10:0});
   const [vName,setVName]=useState("");
   const [saving,setSaving]=useState(false);
   const [savedMsg,setSavedMsg]=useState(null);
-  const [fSortie,setFSortie]=useState({B2:0,B5:0,B10:0});
-  const [fEntree,setFEntree]=useState({B2:0,B5:0,B10:0});
-  const [fSaving,setFSaving]=useState(false);
-
-  const [cDraft,setCDraft]=useState(null);
-  const [cName,setCName]=useState("");
 
   useEffect(()=>{
-    const unsub=onSnapshot(doc(dbChecklists,"stockapp_o2","reserve"), snap=>{
-      const d=snap.exists()?snap.data():O2_EMPTY_RESERVE;
-      setReserve(normO2Reserve(d));
-    });
+    const unsub=onSnapshot(doc(dbChecklists,"stockapp_o2","reserve"), snap=>setReserve(normO2Reserve(snap.exists()?snap.data():null)));
     return ()=>unsub();
   },[]);
 
@@ -1539,107 +1650,14 @@ function O2ReserveView({ onBack, themeMode, toggleTheme, emails }){
     setSaving(false);
     setSavedMsg("✅ Mouvement enregistré");
     resetVehicleForm();
-    setTimeout(()=>{ setSavedMsg(null); setScreen("home"); setSelectedVehicle(null); }, 1200);
+    setTimeout(()=>{ setSavedMsg(null); setSelectedVehicle(null); }, 1200);
   };
 
-  const canSendFournisseur = (Object.values(fSortie).some(v=>v>0)||Object.values(fEntree).some(v=>v>0)) && !fSaving;
-  const handleSendFournisseur=async()=>{
-    if(!canSendFournisseur) return;
-    setFSaving(true);
-    const {current,next}=await applyO2Movement("fournisseur", fSortie, fEntree, {});
-    await checkAndSendO2LowStock(current,next,emails);
-    setFSaving(false);
-    setFSortie({B2:0,B5:0,B10:0});
-    setFEntree({B2:0,B5:0,B10:0});
-    setScreen("home");
-  };
-
-  const headerBar = (title) => (
-    <div style={{ background:CK_C.panel, borderBottom:`1px solid ${CK_C.border}`, padding:"14px 16px", display:"flex", alignItems:"center", justifyContent:"space-between", flexWrap:"wrap", gap:10, position:"sticky", top:0, zIndex:10 }}>
-      <div style={{ display:"flex", alignItems:"center", gap:10 }}>
-        <button onClick={()=>{ if(screen==="home"){onBack();}else{setScreen("home");setSelectedVehicle(null);resetVehicleForm();} }} style={{ background:"transparent", border:`1px solid ${CK_C.border}`, borderRadius:8, color:CK_C.muted, padding:"6px 12px", fontSize:14, cursor:"pointer" }}>←</button>
-        <div style={{ fontWeight:800, fontSize:16 }}>{title}</div>
-      </div>
-      <div style={{ display:"flex", alignItems:"center", gap:8 }}>
-        {screen==="home"&&<button onClick={()=>{ setCDraft(JSON.parse(JSON.stringify(reserve))); setCName(""); setScreen("corriger"); }} style={{background:CK_C.panel2,border:`1px solid ${CK_C.border}`,borderRadius:8,color:CK_C.muted,padding:"6px 12px",fontSize:11,fontWeight:600,cursor:"pointer"}}>✏️ Corriger</button>}
-        {screen==="home"&&<button onClick={()=>setScreen("historique")} style={{background:CK_C.panel2,border:`1px solid ${CK_C.border}`,borderRadius:8,color:CK_C.muted,padding:"6px 12px",fontSize:11,fontWeight:600,cursor:"pointer"}}>📅 Historique</button>}
-        {screen==="home"&&<button onClick={()=>setScreen("fournisseur")} style={{background:CK_C.panel2,border:`1px solid ${CK_C.border}`,borderRadius:8,color:CK_C.muted,padding:"6px 12px",fontSize:11,fontWeight:600,cursor:"pointer"}}>🚚 Livraison fournisseur</button>}
-        <button onClick={toggleTheme} style={{background:CK_C.panel2,border:`1px solid ${CK_C.border}`,borderRadius:8,color:CK_C.muted,padding:"6px 12px",fontSize:11,fontWeight:600,cursor:"pointer"}}>{themeMode==="light"?"🌙":"☀️"}</button>
-      </div>
-    </div>
-  );
-
-  if(screen==="corriger"&&cDraft){
-    const setP=(k,s,v)=>setCDraft(p=>({ ...p, [k]:{ ...p[k], [s]:v } }));
-    const setV=(veh,s,v)=>setCDraft(p=>({ ...p, vehicules:{ ...p.vehicules, [veh]:{ ...p.vehicules[veh], [s]:v } } }));
-    const canSave=cName.trim().length>0;
-    const save=()=>{
-      if(!canSave) return;
-      applyO2Correction(cDraft,cName.trim()).catch(e=>console.error(e));
-      rememberName(cName);
-      setCDraft(null); setScreen("home");
-    };
-    const box={ background:CK_C.panel, border:`1px solid ${CK_C.border}`, borderRadius:12, padding:"16px", marginBottom:14 };
+  if(selectedVehicle){
     return(
       <div style={{ minHeight:"100dvh", background:CK_C.bg, fontFamily:"'DM Sans',sans-serif", color:CK_C.text, display:"flex", flexDirection:"column" }}>
         <style>{CK_GS}</style>
-        {headerBar("✏️ Corriger l'O₂")}
-        <div style={{ flex:1, padding:"18px", maxWidth:420, margin:"0 auto", width:"100%" }}>
-          <div style={{ fontSize:12, color:CK_C.muted, marginBottom:14 }}>Encode ce qui est réellement là. Les chiffres remplacent les anciens.</div>
-          <div style={box}>
-            <div style={{ fontSize:11, fontWeight:700, color:"#3b82f6", textTransform:"uppercase", marginBottom:4 }}>Stock — bouteilles pleines</div>
-            {O2_SIZES.map(s=>(<BottleStepper key={s} label={s} value={cDraft.pleines[s]||0} onChange={v=>setP("pleines",s,v)} max={99}/>))}
-          </div>
-          <div style={box}>
-            <div style={{ fontSize:11, fontWeight:700, color:CK_C.muted, textTransform:"uppercase", marginBottom:4 }}>Stock — bouteilles vides</div>
-            {O2_SIZES.map(s=>(<BottleStepper key={s} label={s} value={cDraft.vides[s]||0} onChange={v=>setP("vides",s,v)} max={99}/>))}
-          </div>
-          {O2_VEHICLES.map(veh=>(
-            <div key={veh} style={box}>
-              <div style={{ fontSize:11, fontWeight:700, color:CK_C.success, textTransform:"uppercase", marginBottom:4 }}>{veh==="Préventif"?"🧰 Préventif":`🚑 ${veh}`} — bouteilles dedans</div>
-              {O2_SIZES.map(s=>(<BottleStepper key={s} label={s} value={cDraft.vehicules[veh][s]||0} onChange={v=>setV(veh,s,v)} max={9}/>))}
-            </div>
-          ))}
-          <input value={cName} onChange={e=>setCName(e.target.value)} placeholder="Ton nom (obligatoire)*" style={{ width:"100%", background:CK_C.bg, border:`1px solid ${cName.trim()?CK_C.border:CK_C.danger}`, borderRadius:8, padding:"10px 12px", color:CK_C.text, fontSize:13, marginBottom:14, boxSizing:"border-box" }}/>
-          <button disabled={!canSave} onClick={save} style={{ width:"100%", background:canSave?CK_C.success:CK_C.border, border:"none", borderRadius:10, color:"white", padding:"14px", fontWeight:800, fontSize:15, marginBottom:30 }}>✅ Enregistrer la correction</button>
-        </div>
-      </div>
-    );
-  }
-
-  if(screen==="historique"){
-    return <O2HistoriqueSubView onBack={()=>setScreen("home")} themeMode={themeMode} toggleTheme={toggleTheme}/>;
-  }
-
-  if(screen==="fournisseur"){
-    return(
-      <div style={{ minHeight:"100dvh", background:CK_C.bg, fontFamily:"'DM Sans',sans-serif", color:CK_C.text, display:"flex", flexDirection:"column" }}>
-        <style>{CK_GS}</style>
-        {headerBar("🚚 Livraison fournisseur")}
-        <div style={{ flex:1, padding:"18px", maxWidth:420, margin:"0 auto", width:"100%" }}>
-          <div style={{ background:CK_C.panel, border:`1px solid ${CK_C.border}`, borderRadius:12, padding:"16px", marginBottom:14 }}>
-            <div style={{ fontSize:11, fontWeight:700, color:CK_C.danger, textTransform:"uppercase", marginBottom:4 }}>Sortie</div>
-            <div style={{ fontSize:10, color:CK_C.muted, marginBottom:6 }}>Vides reprises par le fournisseur</div>
-            {O2_SIZES.map(s=>(<BottleStepper key={s} label={s} value={fSortie[s]} onChange={v=>setFSortie(p=>({...p,[s]:v}))} max={99}/>))}
-          </div>
-          <div style={{ background:CK_C.panel, border:`1px solid ${CK_C.border}`, borderRadius:12, padding:"16px", marginBottom:16 }}>
-            <div style={{ fontSize:11, fontWeight:700, color:CK_C.success, textTransform:"uppercase", marginBottom:4 }}>Entrée</div>
-            <div style={{ fontSize:10, color:CK_C.muted, marginBottom:6 }}>Pleines livrées par le fournisseur</div>
-            {O2_SIZES.map(s=>(<BottleStepper key={s} label={s} value={fEntree[s]} onChange={v=>setFEntree(p=>({...p,[s]:v}))} max={99}/>))}
-          </div>
-          <button disabled={!canSendFournisseur} onClick={handleSendFournisseur} style={{ width:"100%", background:canSendFournisseur?CK_C.success:CK_C.border, border:"none", borderRadius:10, color:"white", padding:"14px", fontWeight:800, fontSize:15, cursor:canSendFournisseur?"pointer":"not-allowed", opacity:canSendFournisseur?1:0.6 }}>
-            {fSaving?"Envoi…":"✅ Enregistrer"}
-          </button>
-        </div>
-      </div>
-    );
-  }
-
-  if(screen==="vehicle"&&selectedVehicle){
-    return(
-      <div style={{ minHeight:"100dvh", background:CK_C.bg, fontFamily:"'DM Sans',sans-serif", color:CK_C.text, display:"flex", flexDirection:"column" }}>
-        <style>{CK_GS}</style>
-        {headerBar(selectedVehicle==="Préventif"?"🧰 Préventif":`🚑 ${selectedVehicle}`)}
+        <O2Header title={selectedVehicle==="Préventif"?"🧰 Préventif":`🚑 ${selectedVehicle}`} onBack={()=>{ setSelectedVehicle(null); resetVehicleForm(); }} themeMode={themeMode} toggleTheme={toggleTheme}/>
         <div style={{ flex:1, padding:"18px", maxWidth:420, margin:"0 auto", width:"100%" }}>
           {savedMsg?(
             <div style={{ background:CK_C.successSoft, border:`1px solid ${CK_C.success}`, borderRadius:10, padding:"16px", textAlign:"center", fontWeight:700, color:CK_C.success }}>{savedMsg}</div>
@@ -1672,7 +1690,7 @@ function O2ReserveView({ onBack, themeMode, toggleTheme, emails }){
   return(
     <div style={{ minHeight:"100dvh", background:CK_C.bg, fontFamily:"'DM Sans',sans-serif", color:CK_C.text, display:"flex", flexDirection:"column" }}>
       <style>{CK_GS}</style>
-      {headerBar("O₂ Réserve")}
+      <O2Header title="O₂ Réserve" onBack={onBack} themeMode={themeMode} toggleTheme={toggleTheme}/>
       <div style={{ display:"flex", gap:8, padding:"16px 18px 0" }}>
         {O2_SIZES.map(s=>{
           const low=(reserve.pleines[s]||0)<=2;
@@ -1680,6 +1698,8 @@ function O2ReserveView({ onBack, themeMode, toggleTheme, emails }){
             <div key={s} style={{ flex:1, background:low?CK_C.dangerSoft:CK_C.panel, border:`1px solid ${low?CK_C.danger:CK_C.border}`, borderRadius:12, padding:"12px", textAlign:"center" }}>
               <div style={{ fontSize:22, fontWeight:900, color:low?CK_C.danger:"#3b82f6" }}>{reserve.pleines[s]||0}</div>
               <div style={{ fontSize:10, color:low?CK_C.danger:CK_C.muted, fontWeight:700, marginTop:2 }}>{s} pleines</div>
+              <div style={{ fontSize:18, fontWeight:900, color:CK_C.muted, marginTop:8, paddingTop:8, borderTop:`1px solid ${CK_C.border}` }}>{reserve.vides[s]||0}</div>
+              <div style={{ fontSize:10, color:CK_C.muted, fontWeight:700, marginTop:2 }}>{s} vides</div>
             </div>
           );
         })}
@@ -1687,7 +1707,7 @@ function O2ReserveView({ onBack, themeMode, toggleTheme, emails }){
       <div style={{ flex:1, padding:"18px", maxWidth:480, margin:"0 auto", width:"100%" }}>
         <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:10 }}>
           {O2_VEHICLES.map(v=>(
-            <button key={v} onClick={()=>{setSelectedVehicle(v);setScreen("vehicle");}} style={{ background:CK_C.panel, border:`1px solid ${CK_C.border}`, borderRadius:12, padding:"18px 10px", color:CK_C.text, fontWeight:700, fontSize:14, cursor:"pointer" }}>
+            <button key={v} onClick={()=>setSelectedVehicle(v)} style={{ background:CK_C.panel, border:`1px solid ${CK_C.border}`, borderRadius:12, padding:"18px 10px", color:CK_C.text, fontWeight:700, fontSize:14, cursor:"pointer" }}>
               {v==="Préventif"?"🧰 Préventif":`🚑 ${v}`}
               <div style={{ fontSize:10, fontWeight:600, color:CK_C.muted, marginTop:4 }}>{o2ContentText(reserve.vehicules[v])}</div>
             </button>
@@ -1981,10 +2001,12 @@ function VehicleProducts({ vehicle, catalogue, stockInit, setStockInit, pct, sto
 }
 
 // Réappro véhicules : choix Ambu / TPMR → véhicules → produits
-function ReapproVehicules({ checklists, tpmrVslTemplate, stockInit, setStockInit, pct, stockEmails, onBack, themeMode, toggleTheme }){
+function ReapproVehicules({ sealedTemplates, checklists, tpmrVslTemplate, stockInit, setStockInit, pct, stockEmails, onBack, themeMode, toggleTheme }){
   const stockMap=useStockMap();
   const [kind,setKind]=useState(null); // "AMB" | "TPMR"
   const [vehicle,setVehicle]=useState(null);
+  const [part,setPart]=useState(null); // null | inside | sealed
+  const [model,setModel]=useState(null);
 
   const ambNames=Object.keys(checklists).sort((a,b)=>a.localeCompare(b));
   const lowFor=(v)=>{
@@ -1993,7 +2015,14 @@ function ReapproVehicules({ checklists, tpmrVslTemplate, stockInit, setStockInit
   };
 
   if(vehicle){
-    return <VehicleProducts vehicle={vehicle} catalogue={buildCatalogue(vehicle,checklists,tpmrVslTemplate)} stockInit={stockInit} setStockInit={setStockInit} pct={pct} stockEmails={stockEmails} onBack={()=>setVehicle(null)} themeMode={themeMode} toggleTheme={toggleTheme}/>;
+    const models=sealedModelsForVehicle(sealedTemplates,checklists,vehicle);
+    const leaveVehicle=()=>{ setVehicle(null); setPart(null); setModel(null); };
+    if(models.length>0&&part===null) return <VehicleHub vehicle={vehicle} onInside={()=>setPart("inside")} onSealed={()=>setPart("sealed")} onBack={leaveVehicle} themeMode={themeMode} toggleTheme={toggleTheme}/>;
+    if(part==="sealed"){
+      if(model) return <SealedBagView tpl={model} vehicle={vehicle} mode="stock" stockEmails={stockEmails} onBack={()=>setModel(null)} themeMode={themeMode} toggleTheme={toggleTheme}/>;
+      return <SealedVehicleHome vehicle={vehicle} models={models} onPick={setModel} onBack={()=>setPart(null)} themeMode={themeMode} toggleTheme={toggleTheme}/>;
+    }
+    return <VehicleProducts vehicle={vehicle} catalogue={buildCatalogue(vehicle,checklists,tpmrVslTemplate)} stockInit={stockInit} setStockInit={setStockInit} pct={pct} stockEmails={stockEmails} onBack={()=>{ if(models.length>0) setPart(null); else leaveVehicle(); }} themeMode={themeMode} toggleTheme={toggleTheme}/>;
   }
   const bigBtn=(icon,label,sub,onClick,badge)=>(
     <button onClick={onClick} style={{ width:"100%", background:CK_C.panel, border:`1px solid ${CK_C.border}`, borderRadius:16, padding:"22px 20px", color:CK_C.text, display:"flex", alignItems:"center", gap:16, textAlign:"left", marginBottom:12 }}>
@@ -2011,7 +2040,7 @@ function ReapproVehicules({ checklists, tpmrVslTemplate, stockInit, setStockInit
       <Page>
         <TopBar title="📦 Réappro véhicules" subtitle="Choisis le type de véhicule" onBack={onBack} themeMode={themeMode} toggleTheme={toggleTheme}/>
         <div style={{ padding:20, maxWidth:480, margin:"0 auto", width:"100%" }}>
-          {bigBtn("🚑","Ambu",`${ambNames.length} ambulances`,()=>setKind("AMB"),lowAmb)}
+          {bigBtn("🚑","Ambulance",`${ambNames.length} ambulances`,()=>setKind("AMB"),lowAmb)}
           {bigBtn("♿","TPMR / VSL",`${TPMR_VSL_VEHICLES.length} véhicules`,()=>setKind("TPMR"),lowTpmr)}
         </div>
       </Page>
@@ -2026,7 +2055,7 @@ function ReapproVehicules({ checklists, tpmrVslTemplate, stockInit, setStockInit
           const low=lowFor(v);
           const init=!!(stockInit&&stockInit[v]);
           return(
-            <button key={v} onClick={()=>setVehicle(v)} style={{ background:CK_C.panel, border:`1px solid ${low?CK_C.danger:CK_C.border}`, borderRadius:14, padding:"20px 10px", color:CK_C.text, fontWeight:800, fontSize:16, display:"flex", flexDirection:"column", alignItems:"center", gap:6 }}>
+            <button key={v} onClick={()=>{ setVehicle(v); setPart(null); setModel(null); }} style={{ background:CK_C.panel, border:`1px solid ${low?CK_C.danger:CK_C.border}`, borderRadius:14, padding:"20px 10px", color:CK_C.text, fontWeight:800, fontSize:16, display:"flex", flexDirection:"column", alignItems:"center", gap:6 }}>
               <span>{kind==="AMB"?"🚑":"♿"} {v}</span>
               {!init?<span style={{ fontSize:10, color:CK_C.warning, fontWeight:700 }}>à initialiser</span>:low>0?<Badge n={`${low} sous le seuil`}/>:<span style={{ fontSize:10, color:CK_C.success, fontWeight:700 }}>✓ stock OK</span>}
             </button>
@@ -2092,14 +2121,13 @@ function RemarqueModal({ emails, onClose }){
 }
 
 // Accueil Réappro : 3 icônes — O₂, Réappro véhicules, Remarque
-function ReapproHome({ sealedTemplates, checklists, tpmrVslTemplate, stockInit, setStockInit, pct, stockEmails, remarqueEmails, o2Emails, onBack, onSettings, onHistory, themeMode, toggleTheme }){
+function ReapproHome({ sealedTemplates, checklists, tpmrVslTemplate, stockInit, setStockInit, pct, stockEmails, remarqueEmails, o2Emails, onBack, themeMode, toggleTheme }){
   const stockMap=useStockMap();
-  const [screen,setScreen]=useState("home"); // home | o2 | veh | sealed
+  const [screen,setScreen]=useState("home"); // home | o2 | veh
   const [showRemarque,setShowRemarque]=useState(false);
 
   if(screen==="o2") return <O2ReserveView onBack={()=>setScreen("home")} themeMode={themeMode} toggleTheme={toggleTheme} emails={o2Emails}/>;
-  if(screen==="sealed") return <SealedBagBrowser mode="stock" sealedTemplates={sealedTemplates} checklists={checklists} stockEmails={stockEmails} onBack={()=>setScreen("home")} themeMode={themeMode} toggleTheme={toggleTheme}/>;
-  if(screen==="veh") return <ReapproVehicules checklists={checklists} tpmrVslTemplate={tpmrVslTemplate} stockInit={stockInit} setStockInit={setStockInit} pct={pct} stockEmails={stockEmails} onBack={()=>setScreen("home")} themeMode={themeMode} toggleTheme={toggleTheme}/>;
+  if(screen==="veh") return <ReapproVehicules sealedTemplates={sealedTemplates} checklists={checklists} tpmrVslTemplate={tpmrVslTemplate} stockInit={stockInit} setStockInit={setStockInit} pct={pct} stockEmails={stockEmails} onBack={()=>setScreen("home")} themeMode={themeMode} toggleTheme={toggleTheme}/>;
 
   const lowTotal=allVehicleNames(checklists).reduce((s,v)=>{
     if(!(stockInit&&stockInit[v])) return s;
@@ -2115,11 +2143,10 @@ function ReapproHome({ sealedTemplates, checklists, tpmrVslTemplate, stockInit, 
   );
   return(
     <Page>
-      <TopBar title="📦 Réappro" subtitle="Réserve · véhicules · remarques" onBack={onBack} themeMode={themeMode} toggleTheme={toggleTheme} onSettings={onSettings} onHistory={onHistory}/>
+      <TopBar title="📦 Réappro" subtitle="Réserve · véhicules · remarques" onBack={onBack} themeMode={themeMode} toggleTheme={toggleTheme}/>
       <div style={{ padding:20, maxWidth:560, margin:"0 auto", width:"100%", display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(150px,1fr))", gap:14 }}>
         {tile(<span style={{ color:"#3b82f6", fontWeight:900 }}>O₂</span>,"O₂","Réserve de bouteilles",()=>setScreen("o2"),0)}
         {tile("🚑","Réappro véhicules","Entrées et sorties de produits",()=>setScreen("veh"),lowTotal)}
-        {tile("🔒","Scellé","Sacs et armoires scellés",()=>setScreen("sealed"),0)}
         {tile("📝","Remarque","Message au responsable",()=>setShowRemarque(true),0)}
       </div>
       <ManquementsList checklists={checklists} tpmrVslTemplate={tpmrVslTemplate} stockInit={stockInit}/>
@@ -2137,6 +2164,21 @@ function ReapproHome({ sealedTemplates, checklists, tpmrVslTemplate, stockInit, 
 // modèle est modifié ou supprimé ensuite.
 // ═══════════════════════════════════════════════════════════════
 const SEALED_COL="stockapp_sealed_tasks";
+
+// Modèles triés : Ambulances d'abord, puis TPMR / VSL ; ordre alphabétique dans chaque groupe.
+function sortSealedTemplates(list){
+  return [...(list||[])].sort((a,b)=>((a.target==="TPMR")-(b.target==="TPMR"))||a.name.localeCompare(b.name,"fr",{numeric:true}));
+}
+function templateGroups(list){
+  const s=sortSealedTemplates(list);
+  return [
+    { label:"Ambulances", items:s.filter(t=>t.target!=="TPMR") },
+    { label:"TPMR / VSL", items:s.filter(t=>t.target==="TPMR") },
+  ].filter(g=>g.items.length>0);
+}
+function sealedGroupTitle(label){
+  return <div style={{ fontSize:11, fontWeight:800, color:CK_C.muted, textTransform:"uppercase", letterSpacing:"1.2px", margin:"10px 0 0" }}>{label}</div>;
+}
 
 // Véhicules d'un modèle de scellé : ceux cochés dans Paramètres → Scellés (tous si rien n'est coché),
 // sans les véhicules hors service.
@@ -2316,7 +2358,7 @@ function BureauSend({ onBack, checklists, sealedTemplates, outOfService, themeMo
           </div>
         )}
         <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
-          {sealedTemplates.map(t=>(
+          {templateGroups(sealedTemplates).map(g=>(<Fragment key={g.label}>{sealedGroupTitle(g.label)}{g.items.map(t=>(
             <button key={t.id} onClick={()=>{ setMsg(""); setTpl(t); setPicked([]); }} style={{ background:CK_C.panel, border:`1px solid ${CK_C.border}`, borderRadius:13, padding:"16px 20px", color:CK_C.text, textAlign:"left", display:"flex", alignItems:"center", justifyContent:"space-between", cursor:"pointer" }}>
               <div>
                 <div style={{ fontWeight:800, fontSize:16 }}>{t.name}</div>
@@ -2324,7 +2366,7 @@ function BureauSend({ onBack, checklists, sealedTemplates, outOfService, themeMo
               </div>
               <span style={{ color:CK_C.muted, fontSize:20 }}>→</span>
             </button>
-          ))}
+          ))}</Fragment>))}
         </div>
         {tasks.length>0&&(
           <div style={{ marginTop:26 }}>
@@ -2586,7 +2628,7 @@ function SealedBagBrowser({ mode, sealedTemplates, checklists, stockEmails, onBa
       <TopBar title="🔒 Sacs scellés" subtitle="Choisis le sac ou l'armoire" onBack={onBack} themeMode={themeMode} toggleTheme={toggleTheme}/>
       <div style={{ padding:20, maxWidth:480, margin:"0 auto", width:"100%", display:"flex", flexDirection:"column", gap:10 }}>
         {sealedTemplates.length===0&&<div style={{ textAlign:"center", color:CK_C.muted, padding:"40px 10px", fontSize:14 }}>Aucun modèle de sac / armoire.<br/><span style={{ fontSize:11 }}>Crée-en un dans Paramètres → Scellés.</span></div>}
-        {sealedTemplates.map(t=>(
+        {templateGroups(sealedTemplates).map(g=>(<Fragment key={g.label}>{sealedGroupTitle(g.label)}{g.items.map(t=>(
           <button key={t.id} onClick={()=>setTpl(t)} style={{ background:CK_C.panel, border:`1px solid ${CK_C.border}`, borderRadius:13, padding:"16px 20px", color:CK_C.text, textAlign:"left", display:"flex", alignItems:"center", justifyContent:"space-between" }}>
             <div>
               <div style={{ fontWeight:800, fontSize:16 }}>🔒 {t.name}</div>
@@ -2594,7 +2636,56 @@ function SealedBagBrowser({ mode, sealedTemplates, checklists, stockEmails, onBa
             </div>
             <span style={{ color:CK_C.muted, fontSize:20 }}>→</span>
           </button>
-        ))}
+        ))}</Fragment>))}
+      </div>
+    </Page>
+  );
+}
+
+// Réappro véhicules → un véhicule : choix « Intérieur » / « Compartiment scellé ».
+function sealedModelsForVehicle(sealedTemplates, checklists, vehicle){
+  return sortSealedTemplates(sealedTemplates).filter(t=>sealedVehiclesFor(t,checklists,[]).includes(vehicle));
+}
+function VehicleHub({ vehicle, onInside, onSealed, onBack, themeMode, toggleTheme }){
+  const isTpmr=TPMR_VSL_VEHICLES.includes(vehicle);
+  const big=(icon,label,sub,onClick)=>(
+    <button onClick={onClick} style={{ width:"100%", background:CK_C.panel, border:`1px solid ${CK_C.border}`, borderRadius:16, padding:"24px 20px", color:CK_C.text, display:"flex", alignItems:"center", gap:16, textAlign:"left", marginBottom:12 }}>
+      <div style={{ fontSize:36 }}>{icon}</div>
+      <div style={{ flex:1 }}><div style={{ fontWeight:800, fontSize:17 }}>{label}</div><div style={{ fontSize:12, color:CK_C.muted, marginTop:2 }}>{sub}</div></div>
+      <span style={{ color:CK_C.muted, fontSize:20 }}>→</span>
+    </button>
+  );
+  return(
+    <Page>
+      <TopBar title={`${isTpmr?"♿":"🚑"} ${vehicle}`} subtitle="Choisis la zone" onBack={onBack} themeMode={themeMode} toggleTheme={toggleTheme}/>
+      <div style={{ padding:20, maxWidth:480, margin:"0 auto", width:"100%" }}>
+        {big("📦",isTpmr?"Intérieur du véhicule":"Intérieur ambulance","Produits du véhicule : entrées et sorties",onInside)}
+        {big("🔒","Compartiment scellé","Sacs et armoires scellés de ce véhicule",onSealed)}
+      </div>
+    </Page>
+  );
+}
+// Accueil des scellés d'un véhicule : seulement les sacs / armoires qui le concernent.
+function SealedVehicleHome({ vehicle, models, onPick, onBack, themeMode, toggleTheme }){
+  const stockMap=useStockMap();
+  const cur=getChecklistMonthKey();
+  return(
+    <Page>
+      <TopBar title={`🔒 ${vehicle}`} subtitle="Compartiment scellé" onBack={onBack} themeMode={themeMode} toggleTheme={toggleTheme}/>
+      <div style={{ padding:20, maxWidth:480, margin:"0 auto", width:"100%", display:"flex", flexDirection:"column", gap:10 }}>
+        {models.map(t=>{
+          const soonest=sealedBagSoonest(stockMap,sealedBagEntries(t,vehicle));
+          const due=!!soonest&&soonest<=cur;
+          return(
+            <button key={t.id} onClick={()=>onPick(t)} style={{ background:CK_C.panel, border:`1px solid ${due?CK_C.danger:CK_C.border}`, borderRadius:13, padding:"16px 20px", color:CK_C.text, textAlign:"left", display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+              <div>
+                <div style={{ fontWeight:800, fontSize:16 }}>🔒 {t.name}</div>
+                <div style={{ fontSize:11, fontWeight:700, marginTop:3, color:due?CK_C.danger:CK_C.muted }}>{soonest?`Date du scellé : ${monthYearLabel(soonest)}${due?" ⚠":""}`:"Date du scellé : à renseigner"}</div>
+              </div>
+              <span style={{ color:CK_C.muted, fontSize:20 }}>→</span>
+            </button>
+          );
+        })}
       </div>
     </Page>
   );
@@ -2643,7 +2734,7 @@ function OutOfServiceView({ onBack, checklists, outOfService, setOutOfService, t
 }
 
 // Bureau : envoyer une checklist de scellé / contenu des sacs / véhicules hors service
-function BureauView({ onBack, checklists, sealedTemplates, outOfService, setOutOfService, themeMode, toggleTheme }){
+function BureauView({ onBack, onSettings, onHistory, checklists, sealedTemplates, outOfService, setOutOfService, themeMode, toggleTheme }){
   const [section,setSection]=useState(null); // null | send | contenu | oos
   const oosCount=activeOutOfService(outOfService,checklists).length;
   if(section==="send") return <BureauSend onBack={()=>setSection(null)} checklists={checklists} sealedTemplates={sealedTemplates} outOfService={outOfService} themeMode={themeMode} toggleTheme={toggleTheme}/>;
@@ -2659,7 +2750,7 @@ function BureauView({ onBack, checklists, sealedTemplates, outOfService, setOutO
   );
   return(
     <Page>
-      <TopBar title="🏢 Bureau" subtitle="Scellés et véhicules" onBack={onBack} themeMode={themeMode} toggleTheme={toggleTheme}/>
+      <TopBar title="🏢 Bureau" subtitle="Scellés et véhicules" onBack={onBack} themeMode={themeMode} toggleTheme={toggleTheme} onSettings={onSettings} onHistory={onHistory}/>
       <div style={{ padding:20, maxWidth:480, margin:"0 auto", width:"100%" }}>
         {big("📤","Envoyer une checklist","Déclencher la checklist d'un sac ouvert",()=>setSection("send"),0)}
         {big("🔍","Contenu des sacs","Produits et dates de chaque sac scellé",()=>setSection("contenu"),0)}
@@ -2674,10 +2765,10 @@ function BureauView({ onBack, checklists, sealedTemplates, outOfService, setOutO
 // Une checklist envoyée disparaît de la liste ; elle revient vierge le
 // 1er du mois suivant (la clé du document change avec le mois).
 // ═══════════════════════════════════════════════════════════════
-function ChecklistHome({ onBack, onSettings, onHistory, checklists, emails, tpmrVslTemplate, sealedTemplates, stockInit, outOfService, setOutOfService, themeMode, toggleTheme }) {
+function ChecklistHome({ onBack, checklists, emails, tpmrVslTemplate, sealedTemplates, stockInit, outOfService, themeMode, toggleTheme }) {
   const [selected, setSelected] = useState(null);
   const [selectedTpmrVsl, setSelectedTpmrVsl] = useState(null);
-  const [screen, setScreen] = useState("home"); // home | scelle | bureau
+  const [screen, setScreen] = useState("home"); // home | scelle
   const tpmrChecklists = buildTpmrChecklists(tpmrVslTemplate);
   const hasTpmr = Object.keys(tpmrChecklists).length > 0;
   const statuses = useChecklistsMonthStatus(checklists);
@@ -2689,7 +2780,6 @@ function ChecklistHome({ onBack, onSettings, onHistory, checklists, emails, tpmr
   if (selected) return <ChecklistView vehicleName={selected} onBack={() => setSelected(null)} checklists={checklists} emails={emails} stockInit={stockInit} themeMode={themeMode} toggleTheme={toggleTheme}/>;
   if (selectedTpmrVsl && tpmrChecklists[selectedTpmrVsl]) return <ChecklistView vehicleName={selectedTpmrVsl} onBack={()=>setSelectedTpmrVsl(null)} checklists={tpmrChecklists} emails={emails} stockInit={stockInit} themeMode={themeMode} toggleTheme={toggleTheme}/>;
   if (screen==="scelle") return <SealedList onBack={()=>setScreen("home")} emails={emails} themeMode={themeMode} toggleTheme={toggleTheme}/>;
-  if (screen==="bureau") return <BureauView onBack={()=>setScreen("home")} checklists={checklists} sealedTemplates={sealedTemplates} outOfService={outOfService} setOutOfService={setOutOfService} themeMode={themeMode} toggleTheme={toggleTheme}/>;
 
   const sealedStarted = sealedTasks.some(t=>sealedStatuses[t.id]?.started);
   const byName=(a,b)=>a.localeCompare(b,"fr",{numeric:true});
@@ -2697,7 +2787,6 @@ function ChecklistHome({ onBack, onSettings, onHistory, checklists, emails, tpmr
   const ambTodo = Object.keys(checklists).filter(n=>!statuses[n]?.sent&&!oos.includes(n)).sort(byName);
   const tpmrTodo = TPMR_VSL_VEHICLES.filter(n=>tpmrChecklists[n]&&!tpmrVslStatuses[n]?.sent&&!oos.includes(n)&&fleetGroup(n)!==1);
   const vslTodo = TPMR_VSL_VEHICLES.filter(n=>tpmrChecklists[n]&&!tpmrVslStatuses[n]?.sent&&!oos.includes(n)&&fleetGroup(n)===1);
-  const oosCount = activeOutOfService(oos, checklists).length;
 
   const groupTitle=(label)=>(
     <div style={{ fontSize:11, fontWeight:800, color:CK_C.muted, textTransform:"uppercase", letterSpacing:"1.2px", margin:"14px 0 2px" }}>{label}</div>
@@ -2729,7 +2818,7 @@ function ChecklistHome({ onBack, onSettings, onHistory, checklists, emails, tpmr
 
   return (
     <Page>
-      <TopBar title="📋 Checklist" subtitle="Sélectionnez votre véhicule" onBack={onBack} themeMode={themeMode} toggleTheme={toggleTheme} onBureau={()=>setScreen("bureau")} bureauBadge={oosCount} onSettings={onSettings} onHistory={onHistory}/>
+      <TopBar title="📋 Checklist" subtitle="Sélectionnez votre véhicule" onBack={onBack} themeMode={themeMode} toggleTheme={toggleTheme}/>
       <div style={{ textAlign:"center", padding:"10px 20px 0", fontSize:12, color:CK_C.muted, fontWeight:600, textTransform:"capitalize" }}>Checklist mensuelle — {monthYearLabel(monthKey)}</div>
       <div style={{ flex:1, padding:"20px", maxWidth:480, margin:"0 auto", width:"100%" }}>
         <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
@@ -2956,12 +3045,12 @@ function MouvementsView({ onBack, vehicles, themeMode, toggleTheme }){
 // ═══════════════════════════════════════════════════════════════
 // HISTORIQUE — Péremption, Bouteilles O², Mouvements, Checklists
 // ═══════════════════════════════════════════════════════════════
-function HistoriqueHome({ onBack, checklists, tpmrVslTemplate, peremptionEmails, themeMode, toggleTheme }){
+function HistoriqueHome({ onBack, checklists, tpmrVslTemplate, peremptionEmails, o2Emails, themeMode, toggleTheme }){
   const stockMap=useStockMap();
   const [screen,setScreen]=useState("home"); // home | peremption | o2 | mouvements | checklists
 
   if(screen==="peremption") return <PeremptionView onBack={()=>setScreen("home")} checklists={checklists} tpmrVslTemplate={tpmrVslTemplate} peremptionEmails={peremptionEmails} themeMode={themeMode} toggleTheme={toggleTheme}/>;
-  if(screen==="o2") return <O2HistoriqueSubView onBack={()=>setScreen("home")} themeMode={themeMode} toggleTheme={toggleTheme}/>;
+  if(screen==="o2") return <O2HistoriqueSubView emails={o2Emails} onBack={()=>setScreen("home")} themeMode={themeMode} toggleTheme={toggleTheme}/>;
   if(screen==="mouvements") return <MouvementsView onBack={()=>setScreen("home")} vehicles={allVehicleNames(checklists)} themeMode={themeMode} toggleTheme={toggleTheme}/>;
   if(screen==="checklists") return <ChecklistHistoriqueSubView onBack={()=>setScreen("home")} themeMode={themeMode} toggleTheme={toggleTheme}/>;
 
@@ -3033,7 +3122,7 @@ function SealedTemplatesEditor({ templates, setTemplates, ambulanceNames }){
         <button onClick={addTemplate} disabled={!newName.trim()} style={{ width:"100%", background:newName.trim()?C.accent:C.border, border:"none", borderRadius:9, color:"white", padding:"11px", fontWeight:800, fontSize:14 }}>+ Créer le modèle</button>
       </div>
       {templates.length===0&&<div style={{ textAlign:"center", color:C.muted, fontSize:13, padding:"10px 0" }}>Aucun modèle pour l'instant.</div>}
-      {templates.map(t=>{
+      {templateGroups(templates).map(g=>(<Fragment key={g.label}>{sealedGroupTitle(g.label)}{g.items.map(t=>{
         const nbItems=(t.sections||[]).reduce((s,sec)=>s+sec.shelves.reduce((a,sh)=>a+sh.items.length,0),0);
         return(
           <div key={t.id} style={{ display:"flex", alignItems:"center", justifyContent:"space-between", gap:8, background:C.panel, border:`1px solid ${C.border}`, borderRadius:10, padding:"12px 14px", marginBottom:8 }}>
@@ -3047,7 +3136,7 @@ function SealedTemplatesEditor({ templates, setTemplates, ambulanceNames }){
             </div>
           </div>
         );
-      })}
+      })}</Fragment>))}
     </div>
   );
 
@@ -3182,6 +3271,9 @@ function ParametresView({ checklistsData, setChecklistsData, tpmrVslTemplate, se
   const [tab,setTab]=useState("emails");
   const [editingChecklist,setEditingChecklist]=useState(null); // {key, origKey, isNew, norme, edition, sections}
   const [confirmDeleteChecklist,setConfirmDeleteChecklist]=useState(null);
+  // Quand on ouvre/ferme l'édition d'une checklist (ou change d'onglet), on revient en haut de la page.
+  const isEditing=!!editingChecklist;
+  useEffect(()=>{ window.scrollTo(0,0); },[isEditing,tab]);
   const C=CK_C;
 
   const openNewChecklist=()=>{
@@ -3379,7 +3471,7 @@ function ParametresView({ checklistsData, setChecklistsData, tpmrVslTemplate, se
 // ═══════════════════════════════════════════════════════════════
 // ACCUEIL — 2 icônes : Checklist et Réappro
 // ═══════════════════════════════════════════════════════════════
-function HomeView({ onGo, onSettings, onHistory, checklistsData, tpmrVslTemplate, stockInit, stockPct, outOfService, themeMode, toggleTheme }){
+function HomeView({ onGo, checklistsData, tpmrVslTemplate, stockInit, stockPct, outOfService, themeMode, toggleTheme }){
   const stockMap=useStockMap();
   const ambStatuses=useChecklistsMonthStatus(checklistsData);
   const tpmrChecklists=buildTpmrChecklists(tpmrVslTemplate);
@@ -3404,12 +3496,39 @@ function HomeView({ onGo, onSettings, onHistory, checklistsData, tpmrVslTemplate
   );
   return(
     <Page>
-      <TopBar title="A.P.S." subtitle="Checklist & Réappro" themeMode={themeMode} toggleTheme={toggleTheme} onBureau={()=>onGo("bureau")} bureauBadge={activeOutOfService(oos,checklistsData).length} onSettings={onSettings} onHistory={onHistory}/>
+      <TopBar title="A.P.S." subtitle="Checklist & Réappro" themeMode={themeMode} toggleTheme={toggleTheme}/>
       <div style={{ flex:1, padding:"24px 18px", maxWidth:720, margin:"0 auto", width:"100%", display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(220px,1fr))", gap:18, alignContent:"center" }}>
         {tile("📋","Checklist","Contrôle mensuel des véhicules","checklist",pending,"#f59e0b")}
         {tile("📦","Réappro","O₂ · produits des véhicules · remarques","reappro",lowTotal+openIssues.length)}
       </div>
     </Page>
+  );
+}
+
+// ── Verrou du Bureau (Bureau + Paramètres + Historique) ──
+const BUREAU_CODE="2327";
+const BUREAU_LOCK_MS=5*60*1000; // se reverrouille 5 min après le dernier clic
+let bureauUnlockedUntil=0;
+function BureauCodePrompt({ onOk, onCancel }){
+  const [code,setCode]=useState("");
+  const [bad,setBad]=useState(false);
+  const submit=()=>{
+    if(code===BUREAU_CODE){ onOk(); }
+    else{ setBad(true); setCode(""); }
+  };
+  return(
+    <div style={{ position:"fixed", inset:0, background:"rgba(0,0,0,0.85)", display:"flex", alignItems:"center", justifyContent:"center", zIndex:900, padding:16 }}>
+      <div style={{ background:CK_C.panel, border:`1px solid ${CK_C.border}`, borderRadius:16, padding:22, width:320, maxWidth:"100%" }}>
+        <div style={{ fontWeight:800, fontSize:16, marginBottom:4 }}>🔒 Bureau</div>
+        <div style={{ fontSize:12, color:CK_C.muted, marginBottom:14 }}>Entre le code pour continuer.</div>
+        <input autoFocus type="password" inputMode="numeric" value={code} onChange={e=>{ setCode(e.target.value.replace(/\D/g,"").slice(0,8)); setBad(false); }} onKeyDown={e=>{ if(e.key==="Enter") submit(); }} placeholder="Code" style={{ width:"100%", background:CK_C.bg, border:`1px solid ${bad?CK_C.danger:CK_C.border}`, borderRadius:10, padding:"12px", color:CK_C.text, fontSize:22, textAlign:"center", letterSpacing:"6px", boxSizing:"border-box" }}/>
+        {bad&&<div style={{ fontSize:12, color:CK_C.danger, fontWeight:700, marginTop:8, textAlign:"center" }}>Code incorrect</div>}
+        <div style={{ display:"flex", gap:8, marginTop:14 }}>
+          <button onClick={onCancel} style={{ flex:1, background:CK_C.panel2, border:`1px solid ${CK_C.border}`, borderRadius:9, color:CK_C.muted, padding:"12px", fontWeight:700 }}>Annuler</button>
+          <button onClick={submit} disabled={code.length===0} style={{ flex:1, background:code.length?CK_C.success:CK_C.border, border:"none", borderRadius:9, color:"white", padding:"12px", fontWeight:800 }}>OK</button>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -3450,17 +3569,40 @@ export default function App(){
   useEffect(()=>{ cleanOldHistorique(); },[]);
 
   const goHome=()=>setView("home");
+  const goBureau=()=>setView("bureau");
+  const [askCode,setAskCode]=useState(false);
+  const inBureauArea=view==="bureau"||view==="parametres"||view==="historique";
+  const requestBureau=()=>{
+    if(Date.now()<bureauUnlockedUntil){ bureauUnlockedUntil=Date.now()+BUREAU_LOCK_MS; setView("bureau"); }
+    else setAskCode(true);
+  };
+  const codeOk=()=>{ bureauUnlockedUntil=Date.now()+BUREAU_LOCK_MS; setAskCode(false); setView("bureau"); };
+  useEffect(()=>{
+    if(!inBureauArea) return;
+    const touch=()=>{ bureauUnlockedUntil=Date.now()+BUREAU_LOCK_MS; };
+    const check=setInterval(()=>{ if(Date.now()>bureauUnlockedUntil) setView("home"); },10000);
+    document.addEventListener("click",touch,true);
+    return ()=>{ clearInterval(check); document.removeEventListener("click",touch,true); };
+  },[inBureauArea]);
   const common={ themeMode, toggleTheme };
   const openSettings=()=>setView("parametres");
   const openHistory=()=>setView("historique");
+  const oosActive=activeOutOfService(outOfService,checklistsData).length;
 
   let content;
-  if(view==="checklist") content=<ChecklistHome onBack={goHome} onSettings={openSettings} onHistory={openHistory} checklists={checklistsData} emails={checklistEmails} tpmrVslTemplate={tpmrVslTemplate} sealedTemplates={sealedTemplates} stockInit={stockInit} outOfService={outOfService} setOutOfService={setOutOfService} {...common}/>;
-  else if(view==="bureau") content=<BureauView onBack={goHome} checklists={checklistsData} sealedTemplates={sealedTemplates} outOfService={outOfService} setOutOfService={setOutOfService} {...common}/>;
+  if(view==="checklist") content=<ChecklistHome onBack={goHome} checklists={checklistsData} emails={checklistEmails} tpmrVslTemplate={tpmrVslTemplate} sealedTemplates={sealedTemplates} stockInit={stockInit} outOfService={outOfService} setOutOfService={setOutOfService} {...common}/>;
+  else if(view==="bureau") content=<BureauView onBack={goHome} onSettings={openSettings} onHistory={openHistory} checklists={checklistsData} sealedTemplates={sealedTemplates} outOfService={outOfService} setOutOfService={setOutOfService} {...common}/>;
   else if(view==="reappro") content=<ReapproHome sealedTemplates={sealedTemplates} checklists={checklistsData} tpmrVslTemplate={tpmrVslTemplate} stockInit={stockInit} setStockInit={setStockInit} pct={stockPct} stockEmails={stockEmails} remarqueEmails={checklistEmails} o2Emails={o2Emails} onBack={goHome} onSettings={openSettings} onHistory={openHistory} {...common}/>;
-  else if(view==="historique") content=<HistoriqueHome onBack={goHome} checklists={checklistsData} tpmrVslTemplate={tpmrVslTemplate} peremptionEmails={peremptionEmails} {...common}/>;
-  else if(view==="parametres") content=<ParametresView checklistsData={checklistsData} setChecklistsData={setChecklistsData} tpmrVslTemplate={tpmrVslTemplate} setTpmrVslTemplate={setTpmrVslTemplate} checklistEmails={checklistEmails} setChecklistEmails={setChecklistEmails} o2Emails={o2Emails} setO2Emails={setO2Emails} peremptionEmails={peremptionEmails} setPeremptionEmails={setPeremptionEmails} stockEmails={stockEmails} setStockEmails={setStockEmails} stockPct={stockPct} setStockPct={setStockPct} sealedTemplates={sealedTemplates} setSealedTemplates={setSealedTemplates} vehicleLists={vehicleLists} setVehicleLists={setVehicleLists} onBack={goHome} {...common}/>;
-  else content=<HomeView onGo={setView} onSettings={openSettings} onHistory={openHistory} checklistsData={checklistsData} tpmrVslTemplate={tpmrVslTemplate} stockInit={stockInit} stockPct={stockPct} outOfService={outOfService} {...common}/>;
+  else if(view==="historique") content=<HistoriqueHome onBack={goBureau} o2Emails={o2Emails} checklists={checklistsData} tpmrVslTemplate={tpmrVslTemplate} peremptionEmails={peremptionEmails} {...common}/>;
+  else if(view==="parametres") content=<ParametresView checklistsData={checklistsData} setChecklistsData={setChecklistsData} tpmrVslTemplate={tpmrVslTemplate} setTpmrVslTemplate={setTpmrVslTemplate} checklistEmails={checklistEmails} setChecklistEmails={setChecklistEmails} o2Emails={o2Emails} setO2Emails={setO2Emails} peremptionEmails={peremptionEmails} setPeremptionEmails={setPeremptionEmails} stockEmails={stockEmails} setStockEmails={setStockEmails} stockPct={stockPct} setStockPct={setStockPct} sealedTemplates={sealedTemplates} setSealedTemplates={setSealedTemplates} vehicleLists={vehicleLists} setVehicleLists={setVehicleLists} onBack={goBureau} {...common}/>;
+  else content=<HomeView onGo={setView} checklistsData={checklistsData} tpmrVslTemplate={tpmrVslTemplate} stockInit={stockInit} stockPct={stockPct} outOfService={outOfService} {...common}/>;
 
-  return <StockProvider>{content}</StockProvider>;
+  return(
+    <StockProvider>
+      <BureauContext.Provider value={inBureauArea?null:{ open:requestBureau, badge:oosActive }}>
+        {content}
+        {askCode&&<BureauCodePrompt onOk={codeOk} onCancel={()=>setAskCode(false)}/>}
+      </BureauContext.Provider>
+    </StockProvider>
+  );
 }
