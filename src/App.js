@@ -3474,6 +3474,14 @@ function ParametresView({ checklistsData, setChecklistsData, tpmrVslTemplate, se
 // ACCUEIL — 2 icônes : Checklist et Réappro
 // ═══════════════════════════════════════════════════════════════
 function HomeView({ onGo, checklistsData, tpmrVslTemplate, stockInit, stockPct, outOfService, themeMode, toggleTheme }){
+  const [portrait,setPortrait]=useState(()=>typeof window!=="undefined"&&window.matchMedia?window.matchMedia("(orientation: portrait) and (max-width: 700px)").matches:false);
+  useEffect(()=>{
+    if(!window.matchMedia) return;
+    const mq=window.matchMedia("(orientation: portrait) and (max-width: 700px)");
+    const h=()=>setPortrait(mq.matches);
+    mq.addEventListener?mq.addEventListener("change",h):mq.addListener(h);
+    return ()=>{ mq.removeEventListener?mq.removeEventListener("change",h):mq.removeListener(h); };
+  },[]);
   const stockMap=useStockMap();
   const ambStatuses=useChecklistsMonthStatus(checklistsData);
   const tpmrChecklists=buildTpmrChecklists(tpmrVslTemplate);
@@ -3498,8 +3506,9 @@ function HomeView({ onGo, checklistsData, tpmrVslTemplate, stockInit, stockPct, 
   );
   return(
     <Page>
-      <div aria-hidden="true" style={{ position:"fixed", inset:0, zIndex:0, pointerEvents:"none", backgroundImage:`url(${APS_BG})`, backgroundRepeat:"no-repeat", backgroundPosition:"center 60%", backgroundSize:"cover", opacity:themeMode==="light"?0.5:0.4, WebkitMaskImage:"radial-gradient(ellipse 75% 70% at 50% 58%, #000 30%, transparent 100%)", maskImage:"radial-gradient(ellipse 75% 70% at 50% 58%, #000 30%, transparent 100%)" }}/>
+      {!portrait&&<img aria-hidden="true" alt="" src={APS_BG} style={{ position:"fixed", left:"50%", top:"56%", transform:"translate(-50%,-50%)", width:"min(112vw, 160vh)", height:"auto", zIndex:0, pointerEvents:"none", opacity:themeMode==="light"?0.5:0.4, WebkitMaskImage:"radial-gradient(ellipse 50% 50% at 50% 50%, #000 55%, transparent 100%)", maskImage:"radial-gradient(ellipse 50% 50% at 50% 50%, #000 55%, transparent 100%)" }}/>}
       <TopBar logo title="A.P.S." themeMode={themeMode} toggleTheme={toggleTheme}/>
+      {portrait&&<img alt="" src={APS_BG} style={{ display:"block", width:"100%", maxWidth:520, margin:"6px auto -18px", height:"auto", position:"relative", zIndex:0, opacity:themeMode==="light"?0.95:0.8, WebkitMaskImage:"radial-gradient(ellipse 52% 52% at 50% 48%, #000 62%, transparent 100%)", maskImage:"radial-gradient(ellipse 52% 52% at 50% 48%, #000 62%, transparent 100%)" }}/>}
       <div style={{ position:"relative", zIndex:1, flex:1, padding:"24px 18px", maxWidth:720, margin:"0 auto", width:"100%", display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(220px,1fr))", gap:18, alignContent:"center" }}>
         {tile("📋","Checklist","Contrôle mensuel des véhicules","checklist",pending,"#f59e0b")}
         {tile("📦","Réappro","O₂ · produits des véhicules · remarques","reappro",lowTotal+openIssues.length)}
