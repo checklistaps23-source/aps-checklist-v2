@@ -3498,7 +3498,7 @@ function HomeView({ onGo, checklistsData, tpmrVslTemplate, stockInit, stockPct, 
   );
   return(
     <Page>
-      <div aria-hidden="true" style={{ position:"fixed", inset:0, zIndex:0, pointerEvents:"none", backgroundImage:`url(${APS_BG})`, backgroundRepeat:"no-repeat", backgroundPosition:"center 60%", backgroundSize:"cover", opacity:themeMode==="light"?0.5:0.3, filter:themeMode==="light"?"none":"invert(1) hue-rotate(180deg)", WebkitMaskImage:"radial-gradient(ellipse 75% 70% at 50% 58%, #000 30%, transparent 100%)", maskImage:"radial-gradient(ellipse 75% 70% at 50% 58%, #000 30%, transparent 100%)" }}/>
+      <div aria-hidden="true" style={{ position:"fixed", inset:0, zIndex:0, pointerEvents:"none", backgroundImage:`url(${APS_BG})`, backgroundRepeat:"no-repeat", backgroundPosition:"center 60%", backgroundSize:"cover", opacity:themeMode==="light"?0.5:0.4, WebkitMaskImage:"radial-gradient(ellipse 75% 70% at 50% 58%, #000 30%, transparent 100%)", maskImage:"radial-gradient(ellipse 75% 70% at 50% 58%, #000 30%, transparent 100%)" }}/>
       <TopBar logo title="A.P.S." themeMode={themeMode} toggleTheme={toggleTheme}/>
       <div style={{ position:"relative", zIndex:1, flex:1, padding:"24px 18px", maxWidth:720, margin:"0 auto", width:"100%", display:"grid", gridTemplateColumns:"repeat(auto-fit,minmax(220px,1fr))", gap:18, alignContent:"center" }}>
         {tile("📋","Checklist","Contrôle mensuel des véhicules","checklist",pending,"#f59e0b")}
