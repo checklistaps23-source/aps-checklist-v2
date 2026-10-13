@@ -2485,7 +2485,7 @@ function ManquementsList({ checklists, tpmrVslTemplate, stockInit }){
 // SACS SCELLÉS — navigation : modèle (sac pédiatrique, Kata…) → véhicule → contenu du sac.
 //  mode "view"  (Bureau)  : consultation, dates en rouge dès le mois de péremption
 //  mode "stock" (Réappro) : un clic sur un produit ouvre la fiche Entrée / Sortie / Corriger
-// Seuls les produits à péremption (🗓 dans le modèle) sont suivis.
+// Tous les produits du modèle sont listés ; la date de péremption n'est demandée que pour ceux marqués 🗓.
 // ═══════════════════════════════════════════════════════════════
 function sealedBagLabel(tpl, vehicle){ return `${tpl.name} — ${vehicle}`.replace(/\//g,"-"); }
 function sealedBagEntries(tpl, vehicle){
@@ -2493,9 +2493,9 @@ function sealedBagEntries(tpl, vehicle){
   const list=[];
   const seen={};
   (tpl.sections||[]).forEach(sec=>(sec.shelves||[]).forEach(sh=>(sh.items||[]).forEach(it=>{
-    if(!it.n||!it.n.trim()||!it.p||seen[it.n]) return;
+    if(!it.n||!it.n.trim()||seen[it.n]) return;
     seen[it.n]=true;
-    list.push({ name:it.n, q:it.q||1, p:true, section:sec.label, shelf:"", key:peremptionKey(label,it.n) });
+    list.push({ name:it.n, q:it.q||1, p:!!it.p, section:sec.label, shelf:"", key:peremptionKey(label,it.n) });
   })));
   return list;
 }
@@ -2528,7 +2528,7 @@ function SealedBagView({ tpl, vehicle, mode, stockEmails, onBack, themeMode, tog
           <div style={{ fontSize:22, fontWeight:900, color:due?CK_C.danger:CK_C.text }}>{soonest?monthYearLabel(soonest):"—"}{due&&<span style={{ fontSize:12, marginLeft:8 }}>⚠ à rouvrir</span>}</div>
         </div>
         {toast&&<div style={{ background:CK_C.successSoft, border:`1px solid ${CK_C.success}`, borderRadius:10, padding:"10px 12px", marginBottom:12, fontSize:12, color:CK_C.success, fontWeight:700 }}>{toast}</div>}
-        {entries.length===0&&<div style={{ textAlign:"center", color:CK_C.muted, padding:40, fontSize:13 }}>Aucun produit à péremption dans ce modèle.<br/><span style={{ fontSize:11 }}>Active le 🗓 sur les produits concernés dans Paramètres → Scellés.</span></div>}
+        {entries.length===0&&<div style={{ textAlign:"center", color:CK_C.muted, padding:40, fontSize:13 }}>Aucun produit dans ce modèle.<br/><span style={{ fontSize:11 }}>Ajoute les produits dans Paramètres → Scellés.</span></div>}
         {groups.map(g=>(
           <div key={g.label} style={{ marginBottom:14 }}>
             <div style={{ fontSize:11, fontWeight:800, color:CK_C.muted, textTransform:"uppercase", letterSpacing:"1px", margin:"6px 2px 6px" }}>{g.label}</div>
@@ -2541,10 +2541,10 @@ function SealedBagView({ tpl, vehicle, mode, stockEmails, onBack, themeMode, tog
                 <Tag key={e.key} onClick={mode==="stock"?()=>setSel(e):undefined} style={{ width:"100%", display:"flex", alignItems:"center", justifyContent:"space-between", gap:10, background:CK_C.panel, border:`1px solid ${rowDue?CK_C.danger:CK_C.border}`, borderRadius:11, padding:"11px 14px", marginBottom:6, color:CK_C.text, textAlign:"left", cursor:mode==="stock"?"pointer":"default" }}>
                   <div style={{ flex:1, minWidth:0 }}>
                     <div style={{ fontSize:14, fontWeight:700 }}>{e.name}</div>
-                    {lots.length===0&&<div style={{ fontSize:11, marginTop:2, color:CK_C.muted }}>date à renseigner</div>}
+                    {lots.length===0&&e.p&&<div style={{ fontSize:11, marginTop:2, color:CK_C.muted }}>date à renseigner</div>}
                     {lots.map(l=>{
                       const red=!!l.date&&l.date<=cur;
-                      return <div key={l.id} style={{ fontSize:12, marginTop:2, fontWeight:red?800:500, color:red?CK_C.danger:CK_C.muted }}>{l.quantite}× — {l.date?monthYearLabel(l.date):"date à renseigner"}{red?" ⚠ à remplacer":""}</div>;
+                      return <div key={l.id} style={{ fontSize:12, marginTop:2, fontWeight:red?800:500, color:red?CK_C.danger:CK_C.muted }}>{l.quantite}×{e.p?` — ${l.date?monthYearLabel(l.date):"date à renseigner"}`:""}{red?" ⚠ à remplacer":""}</div>;
                     })}
                   </div>
                   <div style={{ textAlign:"right" }}>
