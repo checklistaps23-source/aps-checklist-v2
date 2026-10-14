@@ -664,7 +664,7 @@ function MonthYearPicker({ value, onChange, danger }){
   const now=new Date();
   const [y,m]=value?value.split("-"):["",""];
   const years=Array.from({length:8},(_,i)=>now.getFullYear()-1+i);
-  const months=[["01","Jan"],["02","Fév"],["03","Mar"],["04","Avr"],["05","Mai"],["06","Jun"],["07","Jul"],["08","Aoû"],["09","Sep"],["10","Oct"],["11","Nov"],["12","Déc"]];
+  const months=[["01","1 Jan"],["02","2 Fév"],["03","3 Mar"],["04","4 Avr"],["05","5 Mai"],["06","6 Jun"],["07","7 Jul"],["08","8 Aoû"],["09","9 Sep"],["10","10 Oct"],["11","11 Nov"],["12","12 Déc"]];
   const selStyle={ background:danger?CK_C.dangerSoft:CK_C.bg, border:`1px solid ${danger?CK_C.danger:CK_C.border}`, borderRadius:6, padding:"5px 6px", color:danger?CK_C.danger:CK_C.text, fontSize:11, fontWeight:danger?700:400 };
   return(
     <div style={{ display:"flex", gap:5 }}>
@@ -3247,7 +3247,7 @@ function SealedTemplatesEditor({ templates, setTemplates, ambulanceNames }){
           {sec.shelves[0].items.map((it,i)=>(
             <div key={i} style={{ display:"flex", gap:5, alignItems:"center", marginBottom:6 }}>
               <input value={it.n} onChange={e=>updItems(sec.id,items=>items.map((x,j)=>j===i?{ ...x, n:e.target.value }:x))} placeholder="Nom du produit" style={{ ...inp, flex:1, minWidth:0 }}/>
-              <input type="number" min="1" value={it.q||1} onChange={e=>updItems(sec.id,items=>items.map((x,j)=>j===i?{ ...x, q:Math.max(1,parseInt(e.target.value)||1) }:x))} title="Quantité" style={{ ...inp, width:54, textAlign:"center" }}/>
+              <input type="number" inputMode="numeric" min="1" value={it.q===""?"":(it.q||1)} onFocus={e=>e.target.select()} onChange={e=>updItems(sec.id,items=>items.map((x,j)=>j===i?{ ...x, q:e.target.value===""?"":Math.max(1,parseInt(e.target.value)||1) }:x))} onBlur={()=>{ if(it.q==="") updItems(sec.id,items=>items.map((x,j)=>j===i?{ ...x, q:1 }:x)); }} title="Quantité" style={{ ...inp, width:54, textAlign:"center" }}/>
               <button onClick={()=>updItems(sec.id,items=>items.map((x,j)=>j===i?{ ...x, p:!x.p }:x))} title="Date de péremption" style={{ padding:"7px 8px", borderRadius:7, border:`1px solid ${it.p?"#f59e0b":C.border}`, background:it.p?"#f59e0b20":"transparent", opacity:it.p?1:0.5, fontSize:13 }}>🗓</button>
               <button onClick={()=>updItems(sec.id,items=>items.map((x,j)=>j===i?{ ...x, t:!x.t }:x))} title="À tester" style={{ padding:"7px 8px", borderRadius:7, border:`1px solid ${it.t?"#60a5fa":C.border}`, background:it.t?"#1d4ed820":"transparent", opacity:it.t?1:0.5, fontSize:13 }}>🔧</button>
               <button onClick={()=>updItems(sec.id,items=>items.filter((_,j)=>j!==i))} style={{ background:C.dangerSoft, border:`1px solid ${C.danger}`, borderRadius:7, color:C.danger, padding:"7px 8px", fontSize:11 }}>🗑</button>
@@ -3359,7 +3359,7 @@ function ParametresView({ checklistsData, setChecklistsData, tpmrVslTemplate, se
     setChecklistsData(prev=>{
       const next={...prev};
       if(origKey&&origKey!==key) delete next[origKey];
-      next[key]={norme,edition,sections};
+      next[key]={norme,edition,sections:sections.map(sec=>({...sec,shelves:(sec.shelves||[]).map(sh=>({...sh,items:(sh.items||[]).map(it=>({...it,q:it.q||1}))}))}))};
       return next;
     });
     setEditingChecklist(null);
@@ -3372,6 +3372,32 @@ function ParametresView({ checklistsData, setChecklistsData, tpmrVslTemplate, se
   const updateShelf=(sIdx,shIdx,field,val)=>setEditingChecklist(p=>({...p,sections:p.sections.map((s,i)=>i===sIdx?{...s,shelves:s.shelves.map((sh,j)=>j===shIdx?{...sh,[field]:val}:sh)}:s)}));
   const addItem=(sIdx,shIdx)=>setEditingChecklist(p=>({...p,sections:p.sections.map((s,i)=>i===sIdx?{...s,shelves:s.shelves.map((sh,j)=>j===shIdx?{...sh,items:[...sh.items,{n:"Nouvel article",q:1}]}:sh)}:s)}));
   const removeItem=(sIdx,shIdx,itIdx)=>setEditingChecklist(p=>({...p,sections:p.sections.map((s,i)=>i===sIdx?{...s,shelves:s.shelves.map((sh,j)=>j===shIdx?{...sh,items:sh.items.filter((_,k)=>k!==itIdx)}:sh)}:s)}));
+  const moveSection=(sIdx,dir)=>setEditingChecklist(p=>{ const j=sIdx+dir; if(j<0||j>=p.sections.length) return p; const a=[...p.sections]; [a[sIdx],a[j]]=[a[j],a[sIdx]]; return {...p,sections:a}; });
+  const moveItem=(sIdx,shIdx,itIdx,dir)=>setEditingChecklist(p=>({...p,sections:p.sections.map((s,i)=>i!==sIdx?s:{...s,shelves:s.shelves.map((sh,j)=>{ if(j!==shIdx) return sh; const k=itIdx+dir; if(k<0||k>=sh.items.length) return sh; const a=[...sh.items]; [a[itIdx],a[k]]=[a[k],a[itIdx]]; return {...sh,items:a}; })})}));
+  const moveItemTo=(sIdx,shIdx,itIdx,dest)=>setEditingChecklist(p=>{
+    const [ds,dsh]=dest.split(":").map(Number);
+    const item=p.sections[sIdx].shelves[shIdx].items[itIdx];
+    if(!item||!p.sections[ds]||!p.sections[ds].shelves[dsh]) return p;
+    const sections=p.sections.map((s,i)=>({...s,shelves:s.shelves.map((sh,j)=>{
+      let items=sh.items;
+      if(i===sIdx&&j===shIdx) items=items.filter((_,k)=>k!==itIdx);
+      if(i===ds&&j===dsh) items=[...items,item];
+      return items===sh.items?sh:{...sh,items};
+    })}));
+    return {...p,sections};
+  });
+  const moveTpmrItem=(sIdx,itIdx,dir)=>setTpmrVslTemplate(p=>({...p,sections:p.sections.map((s,i)=>{ if(i!==sIdx) return s; const sh=s.shelves[0]; const k=itIdx+dir; if(!sh||k<0||k>=sh.items.length) return s; const a=[...sh.items]; [a[itIdx],a[k]]=[a[k],a[itIdx]]; return {...s,shelves:[{...sh,items:a}]}; })}));
+  const moveTpmrItemTo=(sIdx,itIdx,ds)=>setTpmrVslTemplate(p=>{
+    const item=(p.sections[sIdx].shelves[0]||{items:[]}).items[itIdx];
+    if(!item||!p.sections[ds]||ds===sIdx) return p;
+    const sections=p.sections.map((s,i)=>{
+      if(i!==sIdx&&i!==ds) return s;
+      const sh=s.shelves[0]||{id:"A",label:"",items:[]};
+      const items=i===sIdx?sh.items.filter((_,k)=>k!==itIdx):[...sh.items,item];
+      return {...s,shelves:[{...sh,items}]};
+    });
+    return {...p,sections};
+  });
   const updateItem=(sIdx,shIdx,itIdx,field,val)=>setEditingChecklist(p=>({...p,sections:p.sections.map((s,i)=>i===sIdx?{...s,shelves:s.shelves.map((sh,j)=>j===shIdx?{...sh,items:sh.items.map((it,k)=>k===itIdx?{...it,[field]:val}:it)}:sh)}:s)}));
 
   const TABS=[{id:"emails",icon:"✉️",label:"Emails"},{id:"checklists",icon:"📋",label:"Checklists"},{id:"scelles",icon:"🔒",label:"Scellés"},{id:"vehicules",icon:"🚐",label:"Véhicules"}];
@@ -3424,10 +3450,16 @@ function ParametresView({ checklistsData, setChecklistsData, tpmrVslTemplate, se
                           <div key={itIdx} style={{marginBottom:8,paddingBottom:8,borderBottom:`1px solid ${C.border}`}}>
                             <div style={{display:"flex",gap:6,alignItems:"center",marginBottom:5,flexWrap:"wrap"}}>
                               <input value={item.n} onChange={e=>setTpmrVslTemplate(p=>({...p,sections:p.sections.map((s,i)=>i!==sIdx?s:{...s,shelves:[{...s.shelves[0],items:s.shelves[0].items.map((it,j)=>j!==itIdx?it:{...it,n:e.target.value})}]})}))} placeholder="Nom de l'article" style={{flex:2,minWidth:120,background:C.bg,color:C.text,fontSize:11,border:`1px solid ${C.border}`,borderRadius:6,padding:"6px 9px"}}/>
-                              <input type="number" min="1" value={item.q||1} onChange={e=>setTpmrVslTemplate(p=>({...p,sections:p.sections.map((s,i)=>i!==sIdx?s:{...s,shelves:[{...s.shelves[0],items:s.shelves[0].items.map((it,j)=>j!==itIdx?it:{...it,q:parseInt(e.target.value)||1})}]})}))} title="Quantité requise" style={{width:50,background:C.bg,color:C.text,fontSize:11,border:`1px solid ${C.border}`,borderRadius:6,padding:"6px"}}/>
+                              <input type="number" inputMode="numeric" min="1" value={item.q===""?"":(item.q||1)} onFocus={e=>e.target.select()} onChange={e=>setTpmrVslTemplate(p=>({...p,sections:p.sections.map((s,i)=>i!==sIdx?s:{...s,shelves:[{...s.shelves[0],items:s.shelves[0].items.map((it,j)=>j!==itIdx?it:{...it,q:e.target.value===""?"":Math.max(1,parseInt(e.target.value)||1)})}]})}))} onBlur={()=>{ if(item.q==="") setTpmrVslTemplate(p=>({...p,sections:p.sections.map((s,i)=>i!==sIdx?s:{...s,shelves:[{...s.shelves[0],items:s.shelves[0].items.map((it,j)=>j!==itIdx?it:{...it,q:1})}]})})); }} title="Quantité requise" style={{width:50,background:C.bg,color:C.text,fontSize:11,border:`1px solid ${C.border}`,borderRadius:6,padding:"6px"}}/>
                               {[["t","TEST"],["s","SCELLÉ"],["p","PÉREMPT."],["container","CONTENANT"]].map(([f,l])=>(
                                 <button key={f} onClick={()=>setTpmrVslTemplate(p=>({...p,sections:p.sections.map((s,i)=>i!==sIdx?s:{...s,shelves:[{...s.shelves[0],items:s.shelves[0].items.map((it,j)=>j!==itIdx?it:{...it,[f]:!it[f]})}]})}))} style={{padding:"4px 7px",borderRadius:5,border:`1px solid ${item[f]?C.accent:C.border}`,background:item[f]?C.accentSoft:"transparent",color:item[f]?C.accent:C.muted,fontSize:9,fontWeight:700,cursor:"pointer"}}>{l}</button>
                               ))}
+                              <button onClick={()=>moveTpmrItem(sIdx,itIdx,-1)} title="Monter" style={{background:C.panel2,border:`1px solid ${C.border}`,borderRadius:5,color:C.muted,padding:"4px 8px",fontSize:11,cursor:"pointer"}}>▲</button>
+                              <button onClick={()=>moveTpmrItem(sIdx,itIdx,1)} title="Descendre" style={{background:C.panel2,border:`1px solid ${C.border}`,borderRadius:5,color:C.muted,padding:"4px 8px",fontSize:11,cursor:"pointer"}}>▼</button>
+                              <select value="" onChange={e=>{ if(e.target.value!=="") moveTpmrItemTo(sIdx,itIdx,Number(e.target.value)); }} title="Déplacer vers une autre section" style={{background:C.panel2,border:`1px solid ${C.border}`,borderRadius:5,color:C.muted,padding:"4px 6px",fontSize:11,maxWidth:110}}>
+                                <option value="">↪ Déplacer…</option>
+                                {tpmrVslTemplate.sections.map((sec,si)=>(si!==sIdx?<option key={si} value={si}>{sec.label||("Section "+(si+1))}</option>:null))}
+                              </select>
                               <button onClick={()=>setTpmrVslTemplate(p=>({...p,sections:p.sections.map((s,i)=>i!==sIdx?s:{...s,shelves:[{...s.shelves[0],items:s.shelves[0].items.filter((_,j)=>j!==itIdx)}]})}))} style={{background:C.dangerSoft,border:`1px solid ${C.danger}`,borderRadius:5,color:C.danger,padding:"4px 8px",fontSize:10,cursor:"pointer"}}>🗑</button>
                             </div>
                             {item.container&&(
@@ -3472,6 +3504,8 @@ function ParametresView({ checklistsData, setChecklistsData, tpmrVslTemplate, se
                       <div style={{display:"flex",gap:8,alignItems:"center",marginBottom:10}}>
                         <input value={section.id} onChange={e=>updateSection(sIdx,"id",e.target.value)} placeholder="ID" style={{width:44,background:C.bg,color:C.text,fontSize:12,border:`1px solid ${C.border}`,borderRadius:7,padding:"7px",textAlign:"center"}}/>
                         <input value={section.label} onChange={e=>updateSection(sIdx,"label",e.target.value)} placeholder="Nom de la section" style={{flex:1,background:C.bg,color:C.text,fontSize:12,border:`1px solid ${C.border}`,borderRadius:7,padding:"7px 10px"}}/>
+                        <button onClick={()=>moveSection(sIdx,-1)} title="Monter la section" style={{background:C.panel2,border:`1px solid ${C.border}`,borderRadius:6,color:C.muted,padding:"6px 8px",fontSize:11,cursor:"pointer"}}>▲</button>
+                        <button onClick={()=>moveSection(sIdx,1)} title="Descendre la section" style={{background:C.panel2,border:`1px solid ${C.border}`,borderRadius:6,color:C.muted,padding:"6px 8px",fontSize:11,cursor:"pointer"}}>▼</button>
                         <button onClick={()=>removeSection(sIdx)} style={{background:C.dangerSoft,border:`1px solid ${C.danger}`,borderRadius:6,color:C.danger,padding:"6px 9px",fontSize:11,cursor:"pointer"}}>🗑</button>
                       </div>
                       {section.shelves.map((shelf,shIdx)=>(
@@ -3483,10 +3517,16 @@ function ParametresView({ checklistsData, setChecklistsData, tpmrVslTemplate, se
                           {shelf.items.map((item,itIdx)=>(
                             <div key={itIdx} style={{display:"flex",gap:6,alignItems:"center",marginBottom:5,flexWrap:"wrap"}}>
                               <input value={item.n} onChange={e=>updateItem(sIdx,shIdx,itIdx,"n",e.target.value)} placeholder="Nom de l'article" style={{flex:2,minWidth:120,background:C.bg,color:C.text,fontSize:11,border:`1px solid ${C.border}`,borderRadius:6,padding:"6px 9px"}}/>
-                              <input type="number" value={item.q||1} onChange={e=>updateItem(sIdx,shIdx,itIdx,"q",parseInt(e.target.value)||1)} style={{width:50,background:C.bg,color:C.text,fontSize:11,border:`1px solid ${C.border}`,borderRadius:6,padding:"6px"}}/>
+                              <input type="number" inputMode="numeric" min="1" value={item.q===""?"":(item.q||1)} onFocus={e=>e.target.select()} onChange={e=>updateItem(sIdx,shIdx,itIdx,"q",e.target.value===""?"":Math.max(1,parseInt(e.target.value)||1))} onBlur={()=>{ if(item.q==="") updateItem(sIdx,shIdx,itIdx,"q",1); }} style={{width:50,background:C.bg,color:C.text,fontSize:11,border:`1px solid ${C.border}`,borderRadius:6,padding:"6px"}}/>
                               {[["t","TEST"],["s","SCELLÉ"],["p","PÉREMPT."],["okOnly","OK SEUL"]].map(([f,l])=>(
                                 <button key={f} onClick={()=>updateItem(sIdx,shIdx,itIdx,f,!item[f])} style={{padding:"4px 7px",borderRadius:5,border:`1px solid ${item[f]?C.accent:C.border}`,background:item[f]?C.accentSoft:"transparent",color:item[f]?C.accent:C.muted,fontSize:9,fontWeight:700,cursor:"pointer"}}>{l}</button>
                               ))}
+                              <button onClick={()=>moveItem(sIdx,shIdx,itIdx,-1)} title="Monter" style={{background:C.panel2,border:`1px solid ${C.border}`,borderRadius:5,color:C.muted,padding:"4px 8px",fontSize:11,cursor:"pointer"}}>▲</button>
+                              <button onClick={()=>moveItem(sIdx,shIdx,itIdx,1)} title="Descendre" style={{background:C.panel2,border:`1px solid ${C.border}`,borderRadius:5,color:C.muted,padding:"4px 8px",fontSize:11,cursor:"pointer"}}>▼</button>
+                              <select value="" onChange={e=>{ if(e.target.value) moveItemTo(sIdx,shIdx,itIdx,e.target.value); }} title="Déplacer vers une autre section" style={{background:C.panel2,border:`1px solid ${C.border}`,borderRadius:5,color:C.muted,padding:"4px 6px",fontSize:11,maxWidth:110}}>
+                                <option value="">↪ Déplacer…</option>
+                                {editingChecklist.sections.flatMap((sec,si)=>sec.shelves.map((shf,shi)=>(<option key={si+":"+shi} value={si+":"+shi}>{(sec.label||sec.id||"Section")+(shf.label?" › "+shf.label:"")}</option>)))}
+                              </select>
                               <button onClick={()=>removeItem(sIdx,shIdx,itIdx)} style={{background:C.dangerSoft,border:`1px solid ${C.danger}`,borderRadius:5,color:C.danger,padding:"4px 7px",fontSize:10,cursor:"pointer"}}>✕</button>
                             </div>
                           ))}
