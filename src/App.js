@@ -1857,7 +1857,7 @@ function ProductSheet({ vehicle, entry, stockDoc, pct, initialised, stockEmails,
             <div style={{ fontSize:11, color:CK_C.muted, marginBottom:8 }}>Remplace le stock de ce produit (inventaire / erreur de saisie).</div>
             {corrLots.map((l,i)=>(
               <div key={l.id||i} style={{ display:"flex", gap:6, alignItems:"center", marginBottom:6 }}>
-                <input type="number" min="0" value={l.quantite} onChange={e=>setCorrLots(p=>p.map((x,j)=>j===i?{...x,quantite:Math.max(0,parseInt(e.target.value)||0)}:x))} style={{ width:70, background:CK_C.bg, border:`1px solid ${CK_C.border}`, borderRadius:8, padding:"9px", color:CK_C.text, fontSize:14 }}/>
+                <input type="number" inputMode="numeric" min="0" placeholder="0" value={l.quantite>0?l.quantite:""} onFocus={e=>e.target.select()} onChange={e=>setCorrLots(p=>p.map((x,j)=>j===i?{...x,quantite:Math.max(0,parseInt(e.target.value)||0)}:x))} style={{ width:70, background:CK_C.bg, border:`1px solid ${CK_C.border}`, borderRadius:8, padding:"9px", color:CK_C.text, fontSize:14 }}/>
                 {entry.p?<div style={{ flex:1 }}><MonthYearPicker value={l.date||""} onChange={v=>setCorrLots(p=>p.map((x,j)=>j===i?{...x,date:v}:x))}/></div>:<div style={{ flex:1 }}/>}
                 <button onClick={()=>setCorrLots(p=>p.filter((_,j)=>j!==i))} style={{ background:CK_C.dangerSoft, border:`1px solid ${CK_C.danger}`, borderRadius:6, color:CK_C.danger, padding:"7px 9px", fontSize:12 }}>🗑</button>
               </div>
@@ -3651,6 +3651,13 @@ export default function App(){
   const [askCode,setAskCode]=useState(false);
   const syncStatus=useSyncStatus();
   useEffect(()=>{ registerOfflineSupport(); },[]);
+  // iPhone : un champ dont le texte fait moins de 16 px fait zoomer Safari. On force 16 px.
+  useEffect(()=>{
+    if(document.getElementById("aps-no-zoom")) return;
+    const st=document.createElement("style"); st.id="aps-no-zoom";
+    st.textContent="input,select,textarea{font-size:16px !important}input{min-width:0}";
+    document.head.appendChild(st);
+  },[]);
   const inBureauArea=view==="bureau"||view==="parametres"||view==="historique";
   const requestBureau=()=>{
     if(Date.now()<bureauUnlockedUntil){ bureauUnlockedUntil=Date.now()+BUREAU_LOCK_MS; setView("bureau"); }
